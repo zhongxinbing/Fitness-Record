@@ -14,7 +14,7 @@ android.api = 35
 android.minapi = 23
 android.archs = arm64-v8a, armeabi-v7a
 android.accept_sdk_license = True
-android.permissions = POST_NOTIFICATIONS, FOREGROUND_SERVICE, FOREGROUND_SERVICE_HEALTH, ACTIVITY_RECOGNITION, WAKE_LOCK
+android.permissions = POST_NOTIFICATIONS, FOREGROUND_SERVICE, FOREGROUND_SERVICE_HEALTH, ACTIVITY_RECOGNITION, WAKE_LOCK, WRITE_EXTERNAL_STORAGE
 
 services = resttimer:services/rest_timer.py:foreground:sticky:foregroundServiceType=health
 

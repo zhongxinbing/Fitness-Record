@@ -236,6 +236,58 @@ class FitnessStoreTests(unittest.TestCase):
             ["飞鸟"],
         )
 
+    def test_active_workout_duration_and_details_are_persisted(self):
+        with patch("fitness_data.time.time", return_value=1000):
+            workout = self.store.add_daily_exercise(
+                "2026-11-19",
+                "胸",
+                {"name": "卧推", "sets": 3, "reps": 8, "weight": 60},
+            )
+        self.assertEqual(workout["started_at"], 1000)
+
+        self.store.update_workout_details(workout["id"], "周一推训练", "状态不错")
+        with patch("fitness_data.time.time", return_value=1465):
+            finished = self.store.finish_workout("2026-11-19")
+
+        self.assertIsNotNone(finished)
+        self.assertEqual(finished["duration_seconds"], 465)
+        persisted = FitnessStore(self.path).data["workouts"][0]
+        self.assertEqual(persisted["title"], "周一推训练")
+        self.assertEqual(persisted["notes"], "状态不错")
+        self.assertEqual(persisted["duration_seconds"], 465)
+
+    def test_editing_exercise_preserves_logged_sets_and_initializes_added_sets(self):
+        workout = self.store.add_daily_exercise(
+            "2026-11-19",
+            "胸",
+            {"name": "卧推", "sets": 2, "reps": 8, "weight": 60},
+        )
+        self.store.update_workout_set(
+            workout["id"],
+            0,
+            0,
+            weight=70,
+            completed=True,
+        )
+
+        self.store.replace_workout_exercise(
+            workout["id"],
+            0,
+            {"name": "器械卧推", "sets": 3, "reps": 10, "weight": 50},
+        )
+
+        exercise = FitnessStore(self.path).data["workouts"][0]["exercises"][0]
+        self.assertEqual(exercise["weight"], 50.0)
+        self.assertEqual(exercise["reps"], 10)
+        self.assertEqual(
+            exercise["set_log"],
+            [
+                {"weight": 70.0, "reps": 8, "completed": True},
+                {"weight": 60.0, "reps": 8, "completed": False},
+                {"weight": 50.0, "reps": 10, "completed": False},
+            ],
+        )
+
     def test_rest_day_and_calendar_summary_are_consistent(self):
         workout = self.store.add_daily_exercise(
             "2026-11-19",

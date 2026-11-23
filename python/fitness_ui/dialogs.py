@@ -200,6 +200,50 @@ class SetEntryPopup(Popup):
         self.on_save(weight, reps)
 
 
+class WorkoutDetailsPopup(Popup):
+    def __init__(
+        self,
+        title: str,
+        notes: str,
+        on_save: Callable[[str, str], bool],
+    ):
+        self.on_save = on_save
+        content = BoxLayout(orientation="vertical", padding=dp(14), spacing=dp(8))
+        content.add_widget(make_label("训练名称", 14, MUTED, 26, True))
+        self.title_input = make_input("例如：周一上肢训练", title)
+        content.add_widget(self.title_input)
+        content.add_widget(make_label("训练备注（最多 1000 字）", 14, MUTED, 26, True))
+        self.notes_input = make_input("记录状态、感受或训练目标", notes, multiline=True)
+        content.add_widget(self.notes_input)
+        self.error_label = make_label("", 12, DANGER, 30)
+        content.add_widget(self.error_label)
+        actions = GridLayout(cols=2, spacing=dp(8), size_hint_y=None, height=dp(48))
+        actions.add_widget(make_button("保存", self.save, height=48))
+        actions.add_widget(
+            make_button("取消", lambda *_: self.dismiss(), height=48, tone="neutral")
+        )
+        content.add_widget(actions)
+        super().__init__(
+            title="训练详情",
+            content=content,
+            size_hint=(0.94, None),
+            height=dp(390),
+        )
+        _style_popup(self)
+
+    def save(self, *_: Any) -> None:
+        title = self.title_input.text.strip()
+        notes = self.notes_input.text.strip()
+        if not title:
+            self.error_label.text = "训练名称不能为空。"
+            return
+        if len(title) > 80 or len(notes) > 1000:
+            self.error_label.text = "训练名称最多 80 字，备注最多 1000 字。"
+            return
+        if self.on_save(title, notes):
+            self.dismiss()
+
+
 PARTS = ("胸", "背", "肩", "手臂", "腿", "臀", "核心", "有氧", "全身")
 PART_NAMES = {
     "胸": "胸部",
@@ -293,6 +337,41 @@ class AlternativeEditorPopup(Popup):
             return
         self.dismiss()
         self.on_save([*self.alternatives, *new_alternatives])
+
+
+class ConfirmActionPopup(Popup):
+    def __init__(
+        self,
+        title: str,
+        message: str,
+        confirm_label: str,
+        on_confirm: Callable[[], None],
+        *,
+        confirm_tone: str = "danger",
+    ):
+        self.on_confirm = on_confirm
+        content = BoxLayout(orientation="vertical", padding=dp(14), spacing=dp(10))
+        content.add_widget(make_label(message, 13, MUTED, 56))
+        actions = GridLayout(cols=2, spacing=dp(8), size_hint_y=None, height=dp(48))
+        actions.add_widget(
+            make_button("取消", lambda *_: self.dismiss(), height=48, tone="neutral")
+        )
+        actions.add_widget(
+            make_button(confirm_label, self.confirm, height=48, tone=confirm_tone)
+        )
+        content.add_widget(actions)
+        super().__init__(
+            title=title,
+            content=content,
+            size_hint=(0.9, None),
+            height=dp(176),
+            auto_dismiss=False,
+        )
+        _style_popup(self)
+
+    def confirm(self, *_: Any) -> None:
+        self.dismiss()
+        self.on_confirm()
 
 
 class ExerciseEditorPopup(Popup):
@@ -422,10 +501,32 @@ class ExerciseEditorPopup(Popup):
             "rest_seconds": rest_seconds,
             "alternatives": alternatives,
         }
+        previous_set_count = len(self.exercise.get("set_log", []))
+        if sets < previous_set_count:
+            ConfirmActionPopup(
+                "确认减少组数",
+                f"减少组数将移除最后 {previous_set_count - sets} 组及其训练数据，无法撤销。",
+                "确认调整",
+                lambda: self._submit_update(updated),
+            ).open()
+            return
+        self._submit_update(updated)
+
+    def _submit_update(self, updated: dict[str, Any]) -> None:
         self.dismiss()
         self.on_save(updated)
 
     def delete(self, *_: Any) -> None:
+        if self.on_delete is None:
+            return
+        ConfirmActionPopup(
+            "确认移除动作",
+            "移除后，此动作及其训练组记录将从本次训练中删除。",
+            "确认移除",
+            self._confirm_delete,
+        ).open()
+
+    def _confirm_delete(self) -> None:
         if self.on_delete is None:
             return
         self.dismiss()

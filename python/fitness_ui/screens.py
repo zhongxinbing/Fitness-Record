@@ -3,23 +3,29 @@
 from __future__ import annotations
 
 import calendar
-import json
 import logging
-import os
-import tempfile
-from datetime import date, datetime
-from pathlib import Path
+import time
+from datetime import date
 from typing import Any
 
 from kivy.metrics import dp
+from kivy.clock import Clock
 from kivy.uix.boxlayout import BoxLayout
 from kivy.uix.gridlayout import GridLayout
 from kivy.uix.popup import Popup
 from kivy.uix.scrollview import ScrollView
 from kivy.uix.widget import Widget
+from kivy.utils import platform
 
 from fitness_data import FitnessStoreError
-from fitness_ui.dialogs import ExerciseEntryPopup, ExerciseEditorPopup, SetEntryPopup
+from fitness_ui.dialogs import (
+    ConfirmActionPopup,
+    ExerciseEntryPopup,
+    ExerciseEditorPopup,
+    SetEntryPopup,
+    WorkoutDetailsPopup,
+)
+from fitness_ui.export import ExportError, ExportPermissionRequired, export_json, share_export
 from fitness_ui.theme import BORDER, MUTED, PRIMARY, SURFACE, TEXT, font_name
 from fitness_ui.widgets import (
     AppToggleButton,
@@ -63,44 +69,56 @@ class ExerciseLogCard(SurfaceCard):
         on_toggle_set: Any,
         on_edit_set: Any,
         on_add_set: Any,
-        on_delete: Any,
     ):
         rows = exercise.get("set_log", [])
+        completed_rows = [entry for entry in rows if entry["completed"]]
+        completed_volume = sum(entry["weight"] * entry["reps"] for entry in completed_rows)
+        self.exercise_name = exercise["name"]
+        self.rest_seconds = exercise.get("rest_seconds", 60)
         super().__init__(
             size_hint_y=None,
-            height=dp(106 + 38 * len(rows)),
+            height=dp(156 + 48 * len(rows)),
             spacing=dp(3),
             padding=(dp(10), dp(6)),
         )
         title_row = BoxLayout(
             orientation="horizontal",
             size_hint_y=None,
-            height=dp(30),
+            height=dp(44),
             spacing=dp(4),
         )
-        title_row.add_widget(make_label(exercise["name"], 15, TEXT, 30, True, shorten=True))
+        title_row.add_widget(make_label(exercise["name"], 15, TEXT, 44, True, shorten=True))
         if is_record:
             title_row.add_widget(make_label("PR", 11, PRIMARY, 26, True))
         options = make_button(
-            "···",
+            "编辑",
             lambda *_: on_edit(),
-            height=30,
+            height=44,
             tone="neutral",
-            font_size=16,
+            font_size=11,
         )
         options.size_hint_x = None
-        options.width = dp(36)
+        options.width = dp(48)
         options.disabled = finished
         title_row.add_widget(options)
         self.add_widget(title_row)
 
+        self.add_widget(
+            make_label(
+                f"已完成 {len(completed_rows)}/{len(rows)} 组 · 训练量 {completed_volume:g} kg",
+                10,
+                MUTED,
+                18,
+            )
+        )
+
         column_header = BoxLayout(
             orientation="horizontal",
             size_hint_y=None,
-            height=dp(22),
+            height=dp(24),
         )
-        for label, width in (("组", .13), ("上次", .27), ("kg", .23), ("次", .20), ("", .17)):
-            heading = make_label(label, 10, MUTED, 22, True)
+        for label, width in (("组", .10), ("上次", .25), ("kg", .20), ("次", .18), ("", .27)):
+            heading = make_label(label, 10, MUTED, 24, True)
             heading.size_hint_x = width
             column_header.add_widget(heading)
         self.add_widget(column_header)
@@ -111,44 +129,45 @@ class ExerciseLogCard(SurfaceCard):
             row = BoxLayout(
                 orientation="horizontal",
                 size_hint_y=None,
-                height=dp(36),
+                height=dp(44),
                 spacing=dp(2),
             )
-            group_label = make_label(str(index + 1), 11, MUTED, 34, True)
-            group_label.size_hint_x = .13
+            group_label = make_label(str(index + 1), 11, MUTED, 44, True)
+            group_label.size_hint_x = .10
             row.add_widget(group_label)
-            previous_label = make_label(previous_text, 10, MUTED, 34)
-            previous_label.size_hint_x = .27
+            previous_label = make_label(previous_text, 10, MUTED, 44)
+            previous_label.size_hint_x = .25
             row.add_widget(previous_label)
             weight_button = make_button(
                 f"{entry['weight']:g}",
                 lambda _, position=index: on_edit_set(position),
-                height=32,
+                height=44,
                 tone="neutral",
                 font_size=11,
             )
-            weight_button.size_hint_x = .23
+            weight_button.size_hint_x = .20
             weight_button.disabled = finished
             row.add_widget(weight_button)
             reps_button = make_button(
                 str(entry["reps"]),
                 lambda _, position=index: on_edit_set(position),
-                height=32,
+                height=44,
                 tone="neutral",
                 font_size=11,
             )
-            reps_button.size_hint_x = .20
+            reps_button.size_hint_x = .18
             reps_button.disabled = finished
             row.add_widget(reps_button)
             complete = bool(entry["completed"])
             check = make_button(
-                "✓" if complete else "○",
+                "已完成" if complete else "开始计时",
                 lambda _, position=index, state=complete: on_toggle_set(position, not state),
-                height=32,
+                height=44,
                 tone="primary" if complete else "secondary",
-                font_size=13,
+                font_size=11,
+                padding=(dp(2), dp(2)),
             )
-            check.size_hint_x = .17
+            check.size_hint_x = .27
             check.disabled = finished
             row.add_widget(check)
             self.add_widget(row)
@@ -156,39 +175,36 @@ class ExerciseLogCard(SurfaceCard):
         controls = BoxLayout(
             orientation="horizontal",
             size_hint_y=None,
-            height=dp(38),
+            height=dp(48),
             spacing=dp(5),
         )
         add_set = make_button(
             "+ 添加一组",
             lambda *_: on_add_set(),
-            height=34,
+            height=44,
             tone="secondary",
-            font_size=10,
+            font_size=12,
         )
-        add_set.size_hint_x = .42
+        add_set.size_hint_x = .5
         add_set.disabled = finished
         controls.add_widget(add_set)
-        rest = make_button(
-            f"休息 {exercise.get('rest_seconds', 60)} 秒",
+        self.rest_button = make_button(
+            f"休息 {self.rest_seconds} 秒",
             lambda *_: on_rest(),
-            height=34,
-            font_size=10,
+            height=44,
+            font_size=12,
         )
-        rest.size_hint_x = .42
-        rest.disabled = finished
-        controls.add_widget(rest)
-        remove = make_button(
-            "删除",
-            lambda *_: on_delete(),
-            height=34,
-            tone="neutral",
-            font_size=10,
-        )
-        remove.size_hint_x = .16
-        remove.disabled = finished
-        controls.add_widget(remove)
+        self.rest_button.size_hint_x = .5
+        self.rest_button.disabled = finished
+        controls.add_widget(self.rest_button)
         self.add_widget(controls)
+
+    def update_rest_timer(self, remaining: int | None) -> None:
+        if remaining is None:
+            self.rest_button.text = f"休息 {self.rest_seconds} 秒"
+            return
+        minutes, seconds = divmod(max(0, remaining), 60)
+        self.rest_button.text = f"剩余 {minutes:02d}:{seconds:02d}"
 
 
 class WorkoutScreen(FitnessScreen):
@@ -223,6 +239,37 @@ class WorkoutScreen(FitnessScreen):
         self.header.add_widget(self.finish_button)
         self.root_layout.add_widget(self.header)
 
+        self.session_card = SurfaceCard(
+            orientation="vertical",
+            size_hint_y=None,
+            height=0,
+            spacing=dp(2),
+            padding=(dp(12), dp(6)),
+        )
+        session_title_row = BoxLayout(
+            orientation="horizontal",
+            size_hint_y=None,
+            height=dp(28),
+            spacing=dp(4),
+        )
+        self.session_title = make_label("", 14, TEXT, 28, True, shorten=True)
+        session_title_row.add_widget(self.session_title)
+        self.session_edit_button = make_button(
+            "···",
+            self.open_workout_details,
+            height=28,
+            tone="neutral",
+        )
+        self.session_edit_button.size_hint_x = None
+        self.session_edit_button.width = dp(38)
+        session_title_row.add_widget(self.session_edit_button)
+        self.session_card.add_widget(session_title_row)
+        self.session_duration = make_label("", 11, PRIMARY, 20, True)
+        self.session_card.add_widget(self.session_duration)
+        self.session_notes = make_label("", 11, MUTED, 20, shorten=True)
+        self.session_card.add_widget(self.session_notes)
+        self.root_layout.add_widget(self.session_card)
+
         self.scroll, self.content = make_scroll_content()
         self.root_layout.add_widget(self.scroll)
         self.add_action_button = make_button(
@@ -233,6 +280,9 @@ class WorkoutScreen(FitnessScreen):
         )
         self.root_layout.add_widget(self.add_action_button)
         self.add_widget(self.root_layout)
+        self.display_workout_id: str | None = None
+        self.exercise_cards: list[ExerciseLogCard] = []
+        Clock.schedule_interval(self._update_session_duration, 1)
 
     def on_pre_enter(self, *_: Any) -> None:
         self.refresh_today()
@@ -248,6 +298,13 @@ class WorkoutScreen(FitnessScreen):
         workouts = self._today_workouts()
         active = self.store.active_workout(self.today)
         display_workouts = [active] if active is not None else workouts[-1:]
+        session = display_workouts[0] if display_workouts else None
+        self.display_workout_id = session["id"] if session is not None else None
+        self.session_card.height = dp(84) if session is not None else 0
+        if session is not None:
+            self.session_title.text = session["title"]
+            self.session_notes.text = session["notes"] or "添加训练备注，记录本次状态"
+            self._update_session_duration()
         action_count = sum(len(item["exercises"]) for item in display_workouts)
         parts = list(dict.fromkeys(
             part for workout in display_workouts for part in workout["body_parts"]
@@ -265,9 +322,10 @@ class WorkoutScreen(FitnessScreen):
             for exercise in workout["exercises"]
         )
         self.header_title.text = "训练中" if active is not None else "今日训练"
-        self.header_status.text = f"{part_text}  ({completed_count}/{set_count})"
+        self.header_status.text = f"{part_text} · {completed_count}/{set_count} 组"
         self.finish_button.disabled = active is None
         self.content.clear_widgets()
+        self.exercise_cards = []
         self.content.add_widget(
             section_heading(
                 date.today().strftime("%Y年%m月%d日"),
@@ -289,37 +347,34 @@ class WorkoutScreen(FitnessScreen):
                 is_record = record is not None and bool(logged_weights) and max(
                     logged_weights
                 ) >= record["weight"]
-                self.content.add_widget(
-                    ExerciseLogCard(
-                        exercise,
-                        self._previous_sets(exercise["name"], workout["id"]),
-                        is_record=is_record,
-                        finished=bool(workout["finished"]),
-                        on_edit=lambda selected=workout, position=index: self.edit_exercise(
-                            selected["id"], position
-                        ),
-                        on_rest=lambda selected=exercise: self.start_rest_timer(selected),
-                        on_toggle_set=lambda position, value, selected=workout, action_index=index: self.toggle_set(
-                            selected["id"],
-                            action_index,
-                            position,
-                            value,
-                            selected["exercises"][action_index],
-                        ),
-                        on_edit_set=lambda position, selected=workout, action_index=index: self.edit_set(
-                            selected["id"],
-                            action_index,
-                            position,
-                            selected["exercises"][action_index],
-                        ),
-                        on_add_set=lambda selected=workout, position=index: self.add_set(
-                            selected["id"], position
-                        ),
-                        on_delete=lambda selected=workout, position=index: self.remove_exercise(
-                            selected["id"], position
-                        ),
-                    )
+                card = ExerciseLogCard(
+                    exercise,
+                    self._previous_sets(exercise["name"], workout["id"]),
+                    is_record=is_record,
+                    finished=bool(workout["finished"]),
+                    on_edit=lambda selected=workout, position=index: self.edit_exercise(
+                        selected["id"], position
+                    ),
+                    on_rest=lambda selected=exercise: self.start_rest_timer(selected),
+                    on_toggle_set=lambda position, value, selected=workout, action_index=index: self.toggle_set(
+                        selected["id"],
+                        action_index,
+                        position,
+                        value,
+                        selected["exercises"][action_index],
+                    ),
+                    on_edit_set=lambda position, selected=workout, action_index=index: self.edit_set(
+                        selected["id"],
+                        action_index,
+                        position,
+                        selected["exercises"][action_index],
+                    ),
+                    on_add_set=lambda selected=workout, position=index: self.add_set(
+                        selected["id"], position
+                    ),
                 )
+                self.content.add_widget(card)
+                self.exercise_cards.append(card)
 
         rest_day = any(item["date"] == self.today for item in self.store.data["rest_days"])
         if not rest_day:
@@ -344,6 +399,86 @@ class WorkoutScreen(FitnessScreen):
             self.content.add_widget(
                 make_label("今天还没有训练动作，点击下方按钮开始记录。", 14, MUTED, 48)
             )
+        snapshot = getattr(self.app_ref, "rest_timer_snapshot", None)
+        if snapshot is not None:
+            state, remaining = snapshot()
+            self.update_rest_timer(state, remaining)
+
+    def update_rest_timer(
+        self,
+        state: dict[str, Any] | None,
+        remaining: int,
+    ) -> None:
+        exercise_name = (
+            state.get("exercise")
+            if state is not None and state.get("status") == "running"
+            else None
+        )
+        for card in self.exercise_cards:
+            card.update_rest_timer(
+                remaining if card.exercise_name == exercise_name else None
+            )
+
+    @staticmethod
+    def _format_duration(seconds: int) -> str:
+        minutes, remainder = divmod(max(0, seconds), 60)
+        hours, minutes = divmod(minutes, 60)
+        if hours:
+            return f"{hours:02d}:{minutes:02d}:{remainder:02d}"
+        return f"{minutes:02d}:{remainder:02d}"
+
+    def _update_session_duration(self, *_: Any) -> None:
+        workout_id = getattr(self, "display_workout_id", None)
+        if workout_id is None:
+            return
+        workout = next(
+            (item for item in self.store.data["workouts"] if item["id"] == workout_id),
+            None,
+        )
+        if workout is None:
+            self.session_duration.text = "训练时长 —"
+            return
+        started_at = workout.get("started_at")
+        if not workout["finished"] and isinstance(started_at, (int, float)):
+            seconds = int(max(0, time.time() - started_at))
+        else:
+            seconds = workout.get("duration_seconds")
+        self.session_duration.text = (
+            f"训练时长 {self._format_duration(seconds)}"
+            if isinstance(seconds, int)
+            else "训练时长未记录"
+        )
+
+    def open_workout_details(self, *_: Any) -> None:
+        workout_id = self.display_workout_id
+        if workout_id is None:
+            self.notify("今天还没有训练记录。")
+            return
+        workout = next(
+            (
+                item for item in self.store.data["workouts"]
+                if item["id"] == workout_id
+            ),
+            None,
+        )
+        if workout is None:
+            self.notify("找不到这次训练记录。")
+            return
+        WorkoutDetailsPopup(
+            workout["title"],
+            workout["notes"],
+            lambda title, notes: self._save_workout_details(workout_id, title, notes),
+        ).open()
+
+    def _save_workout_details(self, workout_id: str, title: str, notes: str) -> bool:
+        try:
+            self.store.update_workout_details(workout_id, title, notes)
+        except (KeyError, ValueError, FitnessStoreError) as error:
+            LOGGER.exception("Unable to update workout details")
+            self.notify(f"保存训练详情失败：{error}")
+            return False
+        self.refresh_today()
+        return True
 
     def _previous_sets(
         self,
@@ -432,7 +567,11 @@ class WorkoutScreen(FitnessScreen):
                 return
             self.refresh_today()
 
-        ExerciseEditorPopup(workout["exercises"][index], save).open()
+        ExerciseEditorPopup(
+            workout["exercises"][index],
+            save,
+            lambda: self.remove_exercise(workout_id, index),
+        ).open()
 
     def remove_exercise(self, workout_id: str, index: int) -> None:
         try:
@@ -444,8 +583,15 @@ class WorkoutScreen(FitnessScreen):
         self.refresh_today()
 
     def start_rest_timer(self, exercise: dict[str, Any]) -> None:
+        controller = self.app_ref.timer_controller
+        state = controller.state
+        if state is not None and state.get("status") == "running":
+            if state.get("exercise") != exercise["name"]:
+                self.notify(f"{state.get('exercise', '当前动作')}的休息计时仍在运行。")
+            self.app_ref.open_rest_timer()
+            return
         try:
-            self.app_ref.timer_controller.start(
+            controller.start(
                 exercise["name"],
                 exercise.get("rest_seconds", 60),
             )
@@ -455,6 +601,34 @@ class WorkoutScreen(FitnessScreen):
         self.app_ref.open_rest_timer()
 
     def finish_workout(self, *_: Any) -> None:
+        workout = self.store.active_workout(self.today)
+        if workout is None:
+            self.notify("当前没有进行中的训练。")
+            return
+        incomplete_sets = sum(
+            not entry["completed"]
+            for exercise in workout["exercises"]
+            for entry in exercise.get("set_log", [])
+        )
+        if incomplete_sets:
+            title = "仍有训练组未完成"
+            message = f"还有 {incomplete_sets} 组未完成。仍要结束并保存本次训练吗？"
+            confirm_label = "仍要结束"
+            confirm_tone = "danger"
+        else:
+            title = "结束训练"
+            message = "所有训练组均已完成，确定结束并保存本次训练吗？"
+            confirm_label = "结束训练"
+            confirm_tone = "primary"
+        ConfirmActionPopup(
+            title,
+            message,
+            confirm_label,
+            self._finish_workout_confirmed,
+            confirm_tone=confirm_tone,
+        ).open()
+
+    def _finish_workout_confirmed(self) -> None:
         try:
             workout = self.store.finish_workout(self.today)
         except FitnessStoreError as error:
@@ -561,36 +735,51 @@ class CalendarHistoryScreen(FitnessScreen):
         self.render()
 
     def export_data(self, *_: Any) -> None:
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        destination = Path(self.app_ref.user_data_dir) / f"fitness_record_export_{timestamp}.json"
-        temporary: Path | None = None
         try:
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            with tempfile.NamedTemporaryFile(
-                mode="w",
-                encoding="utf-8",
-                dir=destination.parent,
-                prefix=f".{destination.name}.",
-                suffix=".tmp",
-                delete=False,
-            ) as stream:
-                temporary = Path(stream.name)
-                json.dump(self.store.data, stream, ensure_ascii=False, indent=2)
-                stream.flush()
-                os.fsync(stream.fileno())
-            os.replace(temporary, destination)
-            temporary = None
-        except OSError as error:
+            destination = export_json(self.store.data, self.app_ref.user_data_dir)
+        except ExportPermissionRequired:
+            self._request_export_permission()
+            return
+        except ExportError as error:
             LOGGER.exception("Unable to export fitness data")
             self.notify(f"导出失败：{error}")
             return
-        finally:
-            if temporary is not None:
-                try:
-                    temporary.unlink(missing_ok=True)
-                except OSError:
-                    LOGGER.warning("Could not remove temporary export file %s", temporary, exc_info=True)
-        self.notify(f"数据已导出到应用本地目录：\n{destination}")
+        if platform == "ios":
+            try:
+                if not isinstance(destination, Path):
+                    raise ExportError("导出文件位置无效。")
+                share_export(destination)
+            except ExportError as error:
+                LOGGER.exception("Unable to share exported fitness data")
+                self.notify(f"导出失败：{error}")
+                return
+            self.notify("已打开系统分享菜单，可选择“存储到文件”保存备份。")
+        elif platform == "android":
+            self.notify("已导出到系统“下载”目录的 FitnessRecord 文件夹。")
+        else:
+            self.notify(f"数据已导出到：\n{destination}")
+
+    def _request_export_permission(self) -> None:
+        try:
+            from android.permissions import Permission, request_permissions
+        except ImportError as error:
+            LOGGER.exception("Android storage permission API is unavailable")
+            self.notify(f"无法请求下载目录权限：{error}")
+            return
+        request_permissions(
+            [Permission.WRITE_EXTERNAL_STORAGE],
+            self._on_export_permission_result,
+        )
+
+    def _on_export_permission_result(
+        self,
+        _permissions: list[str],
+        grants: list[bool],
+    ) -> None:
+        if not grants or not all(grants):
+            self.notify("未获得存储权限，数据未导出。")
+            return
+        self.export_data()
 
     def render(self) -> None:
         self.content.clear_widgets()
@@ -682,9 +871,37 @@ class CalendarHistoryScreen(FitnessScreen):
             workouts,
             key=lambda item: (item.get("training_time", ""), item["id"]),
         ):
+            exercise_rows = []
+            for exercise in workout["exercises"]:
+                set_log = exercise.get("set_log", [])
+                exercise_rows.append((exercise, set_log))
+            notes = workout.get("notes", "").strip()
+            duration_seconds = workout.get("duration_seconds")
+            duration_height = 24
+            row_count = 2 + sum(
+                1 + max(1, len(set_log)) for _, set_log in exercise_rows
+            )
+            note_height = (
+                max(44, 22 * ((len(notes) + 17) // 18))
+                if notes
+                else 0
+            )
+            row_count += bool(notes) + bool(duration_height)
+            content_height = (
+                30
+                + 24
+                + sum(
+                    26 + 22 * max(1, len(set_log))
+                    for _, set_log in exercise_rows
+                )
+                + note_height
+                + duration_height
+                + max(0, row_count - 1) * 6
+                + 24
+            )
             card = SurfaceCard(
                 size_hint_y=None,
-                height=dp(104 + 30 * len(workout["exercises"])),
+                height=dp(content_height),
                 spacing=dp(6),
                 padding=dp(12),
             )
@@ -701,7 +918,7 @@ class CalendarHistoryScreen(FitnessScreen):
             )
             parts = "、".join(PART_NAMES.get(part, part) for part in workout["body_parts"])
             card.add_widget(make_label(parts, 12, MUTED, 24))
-            for exercise in workout["exercises"]:
+            for exercise, set_log in exercise_rows:
                 card.add_widget(
                     make_label(
                         f"{exercise['name']}  {exercise['sets']}组×{exercise['reps']}次"
@@ -712,6 +929,43 @@ class CalendarHistoryScreen(FitnessScreen):
                         shorten=True,
                     )
                 )
+                if set_log:
+                    for index, entry in enumerate(set_log, start=1):
+                        status = "已完成" if entry["completed"] else "未完成"
+                        card.add_widget(
+                            make_label(
+                                f"第 {index} 组 · {entry['weight']:g}kg × "
+                                f"{entry['reps']}次 · {status}",
+                                12,
+                                MUTED,
+                                22,
+                                shorten=True,
+                            )
+                        )
+                else:
+                    card.add_widget(
+                        make_label("逐组数据未记录", 12, MUTED, 22)
+                    )
+            if notes:
+                card.add_widget(
+                    make_label(
+                        f"备注：{notes}",
+                        12,
+                        MUTED,
+                        note_height,
+                    )
+                )
+            if isinstance(duration_seconds, int):
+                card.add_widget(
+                    make_label(
+                        f"训练时长 {WorkoutScreen._format_duration(duration_seconds)}",
+                        12,
+                        MUTED,
+                        24,
+                    )
+                )
+            else:
+                card.add_widget(make_label("训练时长未记录", 12, MUTED, 24))
             self.content.add_widget(card)
 
 
@@ -755,6 +1009,8 @@ class LibraryScreen(FitnessScreen):
         tab_row.add_widget(self.template_tab)
         tab_row.add_widget(self.records_tab)
         self.root_layout.add_widget(tab_row)
+        self.template_search = make_input("搜索模板、训练部位或动作")
+        self.template_search.bind(text=self._template_search_changed)
         self.scroll, self.content = make_scroll_content()
         self.root_layout.add_widget(self.scroll)
         self.add_widget(self.root_layout)
@@ -768,9 +1024,44 @@ class LibraryScreen(FitnessScreen):
         self.records_tab.state = "normal"
         self.content.clear_widgets()
         self.content.add_widget(section_heading("动作模板", "选择模板，一键添加到今日训练。"))
+        self.content.add_widget(self.template_search)
+        self.template_list = GridLayout(
+            cols=1,
+            spacing=dp(10),
+            size_hint_y=None,
+        )
+        self.template_list.bind(minimum_height=self.template_list.setter("height"))
+        self.content.add_widget(self.template_list)
+        self._render_template_list()
+
+    def _template_search_changed(self, *_: Any) -> None:
+        if hasattr(self, "template_list"):
+            self._render_template_list()
+
+    def _render_template_list(self) -> None:
+        self.template_list.clear_widgets()
         templates = list(reversed(self.store.data["plans"]))
+        query = self.template_search.text.strip().casefold()
+        if query:
+            templates = [
+                template
+                for template in templates
+                if query in " ".join(
+                    [
+                        template["title"],
+                        *template["body_parts"],
+                        *(PART_NAMES.get(part, part) for part in template["body_parts"]),
+                        *(exercise["name"] for exercise in template["exercises"]),
+                    ]
+                ).casefold()
+            ]
         if not templates:
-            self.content.add_widget(make_label("暂无模板，可从添加动作时收藏。", 14, MUTED, 48))
+            message = (
+                "没有匹配的模板，请调整搜索内容。"
+                if query
+                else "暂无模板，可从添加动作时收藏。"
+            )
+            self.template_list.add_widget(make_label(message, 14, MUTED, 48))
             return
         for template in templates:
             card = SurfaceCard(
@@ -816,7 +1107,7 @@ class LibraryScreen(FitnessScreen):
                 )
             )
             card.add_widget(actions)
-            self.content.add_widget(card)
+            self.template_list.add_widget(card)
 
     def show_records(self) -> None:
         self.template_tab.state = "normal"
@@ -859,6 +1150,25 @@ class LibraryScreen(FitnessScreen):
         self.app_ref.workout_screen.refresh_today()
 
     def delete_template(self, template_id: str) -> None:
+        template = next(
+            (
+                item for item in self.store.data["plans"]
+                if item["id"] == template_id
+            ),
+            None,
+        )
+        if template is None:
+            self.notify("模板不存在或已删除。")
+            self.show_templates()
+            return
+        ConfirmActionPopup(
+            "确认删除模板",
+            f"删除“{template['title']}”及其动作配置？此操作无法撤销。",
+            "删除模板",
+            lambda: self._delete_template_confirmed(template_id),
+        ).open()
+
+    def _delete_template_confirmed(self, template_id: str) -> None:
         try:
             self.store.delete("plans", template_id)
         except (KeyError, FitnessStoreError) as error:

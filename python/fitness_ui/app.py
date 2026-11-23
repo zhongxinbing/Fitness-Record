@@ -148,6 +148,10 @@ class FitnessRecordApp(App):
             LOGGER.exception("Unable to initialize the local fitness store")
             return self._build_storage_error(error)
 
+        self.timer_controller = RestTimerController(
+            self,
+            Path(self.user_data_dir) / "rest_timer.json",
+        )
         Window.clearcolor = BACKGROUND
         if platform == "android":
             Window.softinput_mode = "below_target"
@@ -171,10 +175,6 @@ class FitnessRecordApp(App):
         root.add_widget(self._build_navigation())
         self.manager.bind(current=self._sync_navigation)
         self._sync_navigation()
-        self.timer_controller = RestTimerController(
-            self,
-            Path(self.user_data_dir) / "rest_timer.json",
-        )
         Clock.schedule_once(lambda _delta: self.timer_controller.restore(), 0)
         return root
 
@@ -188,11 +188,19 @@ class FitnessRecordApp(App):
         self.timer_popup = RestTimerPopup(self)
         self.timer_popup.open()
 
+    def rest_timer_snapshot(self) -> tuple[dict[str, Any] | None, int]:
+        controller = getattr(self, "timer_controller", None)
+        if controller is None:
+            return None, 0
+        return controller.state, controller._remaining()
+
     def update_rest_timer(
         self,
         state: dict[str, object] | None,
         remaining: int,
     ) -> None:
+        if hasattr(self, "workout_screen"):
+            self.workout_screen.update_rest_timer(state, remaining)
         if state is None:
             if self.timer_popup is not None:
                 self.timer_popup.dismiss()

@@ -7,6 +7,7 @@ import logging
 import math
 import os
 import tempfile
+import time
 import uuid
 from copy import deepcopy
 from collections import Counter, defaultdict
@@ -234,9 +235,20 @@ class FitnessStore:
             if not isinstance(finished, bool):
                 raise ValueError("训练完成状态无效")
             exercises = validate_exercises(raw)
+            started_at = raw.get("started_at")
+            if started_at is not None and (
+                isinstance(started_at, bool)
+                or not isinstance(started_at, (int, float))
+                or not math.isfinite(started_at)
+                or started_at < 0
+            ):
+                raise ValueError("训练开始时间无效")
+            duration_seconds = raw.get("duration_seconds")
+            if duration_seconds is not None:
+                duration_seconds = _nonnegative_int(duration_seconds, "训练时长")
             for exercise in exercises:
                 exercise["set_log"] = _set_log(exercise, finished)
-            workouts.append({
+            normalized_workout = {
                 **raw,
                 "id": record_id,
                 "date": _valid_date(raw.get("date")),
@@ -246,7 +258,12 @@ class FitnessStore:
                 "exercises": exercises,
                 "notes": notes,
                 "finished": finished,
-            })
+            }
+            if started_at is not None:
+                normalized_workout["started_at"] = float(started_at)
+            if duration_seconds is not None:
+                normalized_workout["duration_seconds"] = duration_seconds
+            workouts.append(normalized_workout)
 
         body_weights: list[dict[str, Any]] = []
         for raw in value["body_weights"]:
@@ -436,6 +453,7 @@ class FitnessStore:
                 "id": uuid.uuid4().hex,
                 "date": clean_date,
                 "training_time": datetime.now().strftime("%H:%M"),
+                "started_at": time.time(),
                 "title": "今日训练",
                 "body_parts": clean_parts,
                 "exercises": normalized_exercises,
@@ -446,6 +464,31 @@ class FitnessStore:
         updated_data["rest_days"] = rest_days
         self._save(updated_data)
         return workout
+
+    def update_workout_details(
+        self,
+        workout_id: str,
+        title: str,
+        notes: str,
+    ) -> None:
+        clean_title = str(title).strip()
+        clean_notes = str(notes).strip()
+        if not clean_title:
+            raise ValueError("训练名称不能为空")
+        if len(clean_title) > 80:
+            raise ValueError("训练名称不能超过 80 个字符")
+        if len(clean_notes) > 1000:
+            raise ValueError("训练备注不能超过 1000 个字符")
+        updated_data = deepcopy(self.data)
+        workout = next(
+            (item for item in updated_data["workouts"] if item["id"] == workout_id),
+            None,
+        )
+        if workout is None:
+            raise KeyError("训练记录不存在")
+        workout["title"] = clean_title
+        workout["notes"] = clean_notes
+        self._save(updated_data)
 
     def replace_workout_exercise(
         self,
@@ -462,6 +505,19 @@ class FitnessStore:
         )
         if workout is None or not 0 <= index < len(workout["exercises"]):
             raise KeyError("训练动作不存在")
+        previous = workout["exercises"][index]
+        previous_sets = _set_log(previous, bool(workout.get("finished")))
+        preserved_sets = [
+            dict(entry) for entry in previous_sets[:normalized["sets"]]
+        ]
+        while len(preserved_sets) < normalized["sets"]:
+            preserved_sets.append({
+                "weight": normalized["weight"],
+                "reps": normalized["reps"],
+                "completed": False,
+            })
+        normalized["set_log"] = preserved_sets
+        normalized["sets"] = len(preserved_sets)
         workout["exercises"][index] = normalized
         self._save(updated_data)
 
@@ -538,6 +594,9 @@ class FitnessStore:
         if not active:
             return None
         workout = active[-1]
+        started_at = workout.get("started_at")
+        if isinstance(started_at, (int, float)) and not isinstance(started_at, bool):
+            workout["duration_seconds"] = max(0, int(time.time() - started_at))
         for exercise in workout["exercises"]:
             exercise["set_log"] = _set_log(exercise, False)
         workout["finished"] = True
