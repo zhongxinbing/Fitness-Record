@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import math
 import re
 from typing import Any, Callable
@@ -374,16 +375,84 @@ class ConfirmActionPopup(Popup):
         self.on_confirm()
 
 
+class BackupImportPopup(Popup):
+    def __init__(
+        self,
+        validate: Callable[[Any], dict[str, Any]],
+        on_restore: Callable[[dict[str, Any]], None],
+    ):
+        self.validate = validate
+        self.on_restore = on_restore
+        content = BoxLayout(orientation="vertical", padding=dp(14), spacing=dp(8))
+        content.add_widget(
+            make_label(
+                "打开备份 JSON 文件，复制全部内容并粘贴到下方。恢复前会自动保留当前数据快照。",
+                13,
+                MUTED,
+                48,
+            )
+        )
+        self.data_input = make_input(
+            "粘贴完整的健身记录 JSON 备份",
+            multiline=True,
+        )
+        self.data_input.height = dp(240)
+        self.data_input.max_text_length = 10_000_000
+        content.add_widget(self.data_input)
+        self.error_label = make_label("", 12, DANGER, 42)
+        content.add_widget(self.error_label)
+        actions = GridLayout(cols=2, spacing=dp(8), size_hint_y=None, height=dp(48))
+        actions.add_widget(
+            make_button("校验并预览", self.submit, height=48)
+        )
+        actions.add_widget(
+            make_button("取消", lambda *_: self.dismiss(), height=48, tone="neutral")
+        )
+        content.add_widget(actions)
+        super().__init__(
+            title="恢复数据备份",
+            content=content,
+            size_hint=(0.96, 0.9),
+            auto_dismiss=False,
+        )
+        _style_popup(self)
+
+    def submit(self, *_: Any) -> None:
+        try:
+            document = json.loads(self.data_input.text)
+            normalized = self.validate(document)
+        except (json.JSONDecodeError, TypeError, ValueError) as error:
+            self.error_label.text = f"备份文件无效：{error}"
+            return
+
+        counts = (
+            f"{len(normalized['workouts'])} 次训练、"
+            f"{len(normalized['plans'])} 个模板、"
+            f"{len(normalized['body_weights'])} 条体重记录"
+        )
+        self.dismiss()
+        ConfirmActionPopup(
+            "确认替换本机数据",
+            f"备份校验通过，包含{counts}。恢复将替换本机全部数据，当前数据会先保存快照。",
+            "确认恢复",
+            lambda: self.on_restore(normalized),
+            confirm_tone="danger",
+        ).open()
+
+
 class ExerciseEditorPopup(Popup):
     def __init__(
         self,
         exercise: dict[str, Any],
         on_save: Callable[[dict[str, Any]], None],
         on_delete: Callable[[], None] | None = None,
+        *,
+        deleting_last_exercise: bool = False,
     ):
         self.exercise = dict(exercise)
         self.on_save = on_save
         self.on_delete = on_delete
+        self.deleting_last_exercise = deleting_last_exercise
         content = BoxLayout(orientation="vertical", padding=dp(14), spacing=dp(8))
         content.add_widget(make_label("可修改动作名称、训练量、组间休息和多个备选动作。", 13, MUTED, 38))
 
@@ -519,10 +588,21 @@ class ExerciseEditorPopup(Popup):
     def delete(self, *_: Any) -> None:
         if self.on_delete is None:
             return
+        if self.deleting_last_exercise:
+            title = "确认删除整次训练"
+            message = (
+                "这是本次训练的最后一个动作。删除后，整次训练记录、训练名称、"
+                "备注和时长也会一并删除。"
+            )
+            confirm_label = "删除整次训练"
+        else:
+            title = "确认移除动作"
+            message = "移除后，此动作及其训练组记录将从本次训练中删除。"
+            confirm_label = "确认移除"
         ConfirmActionPopup(
-            "确认移除动作",
-            "移除后，此动作及其训练组记录将从本次训练中删除。",
-            "确认移除",
+            title,
+            message,
+            confirm_label,
             self._confirm_delete,
         ).open()
 

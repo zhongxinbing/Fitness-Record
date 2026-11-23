@@ -6,6 +6,7 @@ import calendar
 import logging
 import time
 from datetime import date
+from pathlib import Path
 from typing import Any
 
 from kivy.metrics import dp
@@ -19,6 +20,7 @@ from kivy.utils import platform
 
 from fitness_data import FitnessStoreError
 from fitness_ui.dialogs import (
+    BackupImportPopup,
     ConfirmActionPopup,
     ExerciseEntryPopup,
     ExerciseEditorPopup,
@@ -249,19 +251,20 @@ class WorkoutScreen(FitnessScreen):
         session_title_row = BoxLayout(
             orientation="horizontal",
             size_hint_y=None,
-            height=dp(28),
+            height=dp(32),
             spacing=dp(4),
         )
-        self.session_title = make_label("", 14, TEXT, 28, True, shorten=True)
+        self.session_title = make_label("", 14, TEXT, 32, True, shorten=True)
         session_title_row.add_widget(self.session_title)
         self.session_edit_button = make_button(
-            "···",
+            "详情",
             self.open_workout_details,
-            height=28,
+            height=32,
             tone="neutral",
+            font_size=11,
         )
         self.session_edit_button.size_hint_x = None
-        self.session_edit_button.width = dp(38)
+        self.session_edit_button.width = dp(52)
         session_title_row.add_widget(self.session_edit_button)
         self.session_card.add_widget(session_title_row)
         self.session_duration = make_label("", 11, PRIMARY, 20, True)
@@ -300,7 +303,7 @@ class WorkoutScreen(FitnessScreen):
         display_workouts = [active] if active is not None else workouts[-1:]
         session = display_workouts[0] if display_workouts else None
         self.display_workout_id = session["id"] if session is not None else None
-        self.session_card.height = dp(84) if session is not None else 0
+        self.session_card.height = dp(88) if session is not None else 0
         if session is not None:
             self.session_title.text = session["title"]
             self.session_notes.text = session["notes"] or "添加训练备注，记录本次状态"
@@ -571,6 +574,7 @@ class WorkoutScreen(FitnessScreen):
             workout["exercises"][index],
             save,
             lambda: self.remove_exercise(workout_id, index),
+            deleting_last_exercise=len(workout["exercises"]) == 1,
         ).open()
 
     def remove_exercise(self, workout_id: str, index: int) -> None:
@@ -663,6 +667,20 @@ class WorkoutScreen(FitnessScreen):
         self.refresh_today()
         if completed and exercise.get("rest_seconds", 0) > 0:
             self.start_rest_timer(exercise)
+        elif not completed:
+            controller = getattr(self.app_ref, "timer_controller", None)
+            state = getattr(controller, "state", None)
+            if (
+                controller is not None
+                and state is not None
+                and state.get("status") == "running"
+                and state.get("exercise") == exercise["name"]
+            ):
+                try:
+                    controller.cancel()
+                except ValueError as error:
+                    LOGGER.exception("Unable to cancel rest timer after undoing a set")
+                    self.notify(f"已撤销训练组，但取消计时失败：{error}")
 
     def edit_set(
         self,
@@ -712,6 +730,7 @@ class CalendarHistoryScreen(FitnessScreen):
         today = date.today()
         self.month = today.replace(day=1)
         self.selected_date = today.isoformat()
+        self._pending_restore_document: dict[str, Any] | None = None
         self.root_layout = BoxLayout(
             orientation="vertical",
             spacing=dp(8),
@@ -764,6 +783,7 @@ class CalendarHistoryScreen(FitnessScreen):
             from android.permissions import Permission, request_permissions
         except ImportError as error:
             LOGGER.exception("Android storage permission API is unavailable")
+            self._pending_restore_document = None
             self.notify(f"无法请求下载目录权限：{error}")
             return
         request_permissions(
@@ -777,7 +797,17 @@ class CalendarHistoryScreen(FitnessScreen):
         grants: list[bool],
     ) -> None:
         if not grants or not all(grants):
-            self.notify("未获得存储权限，数据未导出。")
+            pending_restore = self._pending_restore_document
+            self._pending_restore_document = None
+            if pending_restore is not None:
+                self.notify("未获得存储权限，未恢复备份。")
+            else:
+                self.notify("未获得存储权限，数据未导出。")
+            return
+        pending_restore = self._pending_restore_document
+        if pending_restore is not None:
+            self._pending_restore_document = None
+            self._restore_backup(pending_restore)
             return
         self.export_data()
 
@@ -790,9 +820,31 @@ class CalendarHistoryScreen(FitnessScreen):
             spacing=dp(8),
         )
         title_row.add_widget(make_label("训练日历", 20, TEXT, 42, True))
+        backfill_button = make_button(
+            "补录",
+            self.open_backfill,
+            height=42,
+            tone="secondary",
+            font_size=11,
+        )
+        backfill_button.size_hint_x = None
+        backfill_button.width = dp(52)
+        backfill_button.disabled = self.selected_date >= date.today().isoformat()
+        title_row.add_widget(backfill_button)
+        restore_button = make_button(
+            "恢复",
+            self.open_restore,
+            height=42,
+            tone="secondary",
+            font_size=11,
+        )
+        restore_button.size_hint_x = None
+        restore_button.width = dp(52)
+        title_row.add_widget(restore_button)
         export_button = make_button("导出", self.export_data, height=42, tone="secondary")
         export_button.size_hint_x = None
-        export_button.width = dp(72)
+        export_button.width = dp(56)
+        export_button.font_size = dp(11)
         title_row.add_widget(export_button)
         self.content.add_widget(title_row)
 
@@ -968,6 +1020,100 @@ class CalendarHistoryScreen(FitnessScreen):
                 card.add_widget(make_label("训练时长未记录", 12, MUTED, 24))
             self.content.add_widget(card)
 
+    def open_backfill(self, *_: Any) -> None:
+        training_date = self.selected_date
+        if training_date >= date.today().isoformat():
+            self.notify("只能为过去日期补录训练。")
+            return
+        ExerciseEntryPopup(
+            on_add=lambda exercise, part: self._add_backfilled_exercise(
+                training_date,
+                exercise,
+                part,
+            ),
+            on_save_template=self._save_backfill_template,
+        ).open()
+
+    def _add_backfilled_exercise(
+        self,
+        training_date: str,
+        exercise: dict[str, Any],
+        body_part: str,
+    ) -> bool:
+        try:
+            self.store.add_historical_exercise(training_date, body_part, exercise)
+        except (KeyError, ValueError, FitnessStoreError) as error:
+            LOGGER.exception("Unable to add a historical workout entry")
+            self.notify(f"补录训练失败：{error}")
+            return False
+        self.render()
+        return True
+
+    def _save_backfill_template(
+        self,
+        exercise: dict[str, Any],
+        body_part: str,
+    ) -> bool:
+        try:
+            self.store.add_plan(f"{exercise['name']} 模板", [body_part], [exercise])
+        except (ValueError, FitnessStoreError) as error:
+            LOGGER.exception("Unable to save template from history")
+            self.notify(f"保存动作模板失败：{error}")
+            return False
+        self.notify("动作模板已保存到资料库。")
+        return True
+
+    def open_restore(self, *_: Any) -> None:
+        BackupImportPopup(
+            self.store.validate_backup_document,
+            self._restore_backup,
+        ).open()
+
+    def _restore_backup(self, document: dict[str, Any]) -> None:
+        try:
+            external_snapshot = export_json(
+                self.store.data,
+                self.app_ref.user_data_dir,
+            )
+        except ExportPermissionRequired:
+            self._pending_restore_document = document
+            self._request_export_permission()
+            return
+        except ExportError as error:
+            LOGGER.exception("Unable to export pre-restore fitness data")
+            self.notify(f"无法创建恢复前备份，未执行恢复：{error}")
+            return
+        if platform == "ios":
+            try:
+                if not isinstance(external_snapshot, Path):
+                    raise ExportError("恢复前备份文件位置无效。")
+                share_export(external_snapshot)
+            except ExportError as error:
+                LOGGER.exception("Unable to share pre-restore fitness data")
+                self.notify(f"无法分享恢复前备份，未执行恢复：{error}")
+                return
+        try:
+            self.store.restore_backup(document)
+        except (FitnessStoreError, TypeError, ValueError) as error:
+            LOGGER.exception("Unable to restore fitness data")
+            self.notify(f"恢复备份失败：{error}")
+            return
+        workout_screen = getattr(self.app_ref, "workout_screen", None)
+        if workout_screen is not None:
+            workout_screen.refresh_today()
+        library_screen = getattr(self.app_ref, "library_screen", None)
+        if library_screen is not None:
+            library_screen.on_pre_enter()
+        self.render()
+        if platform == "android":
+            self.notify("备份已恢复；恢复前数据已导出到系统“下载”目录。")
+        elif platform == "ios":
+            self.notify("备份已恢复；系统分享菜单可将恢复前数据存储到“文件”。")
+        elif isinstance(external_snapshot, Path):
+            self.notify(f"备份已恢复；恢复前数据已导出到：\n{external_snapshot}")
+        else:
+            self.notify("备份已恢复。")
+
 
 class LibraryScreen(FitnessScreen):
     def __init__(self, app: Any, **kwargs: Any):
@@ -1136,6 +1282,23 @@ class LibraryScreen(FitnessScreen):
             self.content.add_widget(card)
 
     def add_template_to_today(self, template: dict[str, Any]) -> None:
+        today = date.today().isoformat()
+        has_finished_workout = any(
+            item["date"] == today and item["finished"]
+            for item in self.store.data["workouts"]
+        )
+        if self.store.active_workout(today) is None and has_finished_workout:
+            ConfirmActionPopup(
+                "开始新的训练记录？",
+                "今天已有已完成的训练。添加此模板会新建一条训练记录。",
+                "开始新训练",
+                lambda: self._add_template_to_today(template),
+                confirm_tone="primary",
+            ).open()
+            return
+        self._add_template_to_today(template)
+
+    def _add_template_to_today(self, template: dict[str, Any]) -> None:
         try:
             self.store.add_daily_exercises(
                 date.today().isoformat(),

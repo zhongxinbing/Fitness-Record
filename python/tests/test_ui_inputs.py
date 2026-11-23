@@ -1,7 +1,8 @@
+import json
 import tempfile
 import time
 import unittest
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, PropertyMock, patch
@@ -14,6 +15,7 @@ from kivy.uix.widget import Widget
 from fitness_data import FitnessStore
 from fitness_ui.app import FitnessRecordApp
 from fitness_ui.dialogs import (
+    BackupImportPopup,
     ExerciseEditorPopup,
     ExerciseEntryPopup,
     WorkoutDetailsPopup,
@@ -210,6 +212,28 @@ class TextInputTests(unittest.TestCase):
         confirm_popup.call_args.args[3]()
         on_delete.assert_called_once_with()
 
+    def test_removing_last_exercise_warns_that_the_workout_will_be_deleted(self):
+        editor = ExerciseEditorPopup(
+            {
+                "name": "卧推",
+                "sets": 1,
+                "reps": 8,
+                "weight": 60,
+                "rest_seconds": 90,
+                "alternatives": [],
+            },
+            Mock(),
+            Mock(),
+            deleting_last_exercise=True,
+        )
+
+        with patch("fitness_ui.dialogs.ConfirmActionPopup") as confirm_popup:
+            editor.delete()
+
+        self.assertIn("整次训练", confirm_popup.call_args.args[0])
+        self.assertIn("训练名称、备注和时长", confirm_popup.call_args.args[1])
+        self.assertEqual(confirm_popup.call_args.args[2], "删除整次训练")
+
     def test_reducing_exercise_sets_requires_confirmation(self):
         on_save = Mock()
         editor = ExerciseEditorPopup(
@@ -251,6 +275,7 @@ class TextInputTests(unittest.TestCase):
             screen.refresh_today()
 
             self.assertEqual(screen.session_title.text, "今日训练")
+            self.assertEqual(screen.session_edit_button.text, "详情")
             self.assertTrue(screen.session_duration.text.startswith("训练时长 "))
             self.assertEqual(screen.display_workout_id, workout["id"])
             self.assertTrue(
@@ -349,6 +374,43 @@ class TextInputTests(unittest.TestCase):
                 )["finished"]
             )
 
+    def test_undoing_set_completion_cancels_same_exercise_timer(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = FitnessStore(Path(temp_dir) / "records.json")
+            workout = store.add_daily_exercise(
+                date.today().isoformat(),
+                "胸",
+                {"name": "卧推", "sets": 1, "reps": 8, "weight": 60},
+            )
+            store.update_workout_set(
+                workout["id"],
+                0,
+                0,
+                completed=True,
+            )
+            controller = Mock()
+            controller.state = {"status": "running", "exercise": "卧推"}
+            app = SimpleNamespace(
+                store=store,
+                timer_controller=controller,
+                rest_timer_snapshot=lambda: (None, 0),
+            )
+            screen = WorkoutScreen(app)
+            exercise = store.data["workouts"][0]["exercises"][0]
+
+            screen.toggle_set(
+                workout["id"],
+                0,
+                0,
+                False,
+                exercise,
+            )
+
+            self.assertFalse(
+                store.data["workouts"][0]["exercises"][0]["set_log"][0]["completed"]
+            )
+            controller.cancel.assert_called_once_with()
+
     def test_history_shows_each_set_notes_and_duration(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             store = FitnessStore(Path(temp_dir) / "records.json")
@@ -421,6 +483,108 @@ class TextInputTests(unittest.TestCase):
                 [item["title"] for item in store.data["plans"]],
                 ["推胸日"],
             )
+
+    def test_adding_template_after_completed_session_requires_confirmation(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = FitnessStore(Path(temp_dir) / "records.json")
+            today = date.today().isoformat()
+            store.add_workout(
+                today,
+                "已完成训练",
+                ["胸"],
+                [{"name": "卧推", "sets": 2, "reps": 8, "weight": 60}],
+            )
+            template = store.add_plan(
+                "拉背日",
+                ["背"],
+                [{"name": "划船", "sets": 3, "reps": 10, "weight": 40}],
+            )
+            app = SimpleNamespace(
+                store=store,
+                workout_screen=SimpleNamespace(refresh_today=Mock()),
+            )
+            screen = LibraryScreen(app)
+
+            with patch("fitness_ui.screens.ConfirmActionPopup") as confirm_popup:
+                screen.add_template_to_today(template)
+
+            self.assertIsNone(store.active_workout(today))
+            self.assertIn("新建一条训练记录", confirm_popup.call_args.args[1])
+            confirm_popup.call_args.args[3]()
+            self.assertIsNotNone(store.active_workout(today))
+
+    def test_history_can_backfill_a_past_date(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = FitnessStore(Path(temp_dir) / "records.json")
+            yesterday = (date.today() - timedelta(days=1)).isoformat()
+            screen = CalendarHistoryScreen(SimpleNamespace(store=store))
+            screen.selected_date = yesterday
+
+            with patch("fitness_ui.screens.ExerciseEntryPopup") as entry_popup:
+                screen.open_backfill()
+
+            self.assertEqual(entry_popup.call_count, 1)
+            self.assertTrue(
+                entry_popup.call_args.kwargs["on_add"](
+                    {"name": "卧推", "sets": 2, "reps": 8, "weight": 60},
+                    "胸",
+                )
+            )
+            self.assertEqual(store.data["workouts"][0]["date"], yesterday)
+            self.assertTrue(store.data["workouts"][0]["finished"])
+
+    def test_backup_restore_popup_previews_validated_data(self):
+        popup = BackupImportPopup(
+            FitnessStore.validate_backup_document,
+            Mock(),
+        )
+        popup.data_input.text = json.dumps({
+            "version": 2,
+            "plans": [],
+            "workouts": [],
+            "body_weights": [],
+            "rest_days": [],
+        })
+
+        with patch("fitness_ui.dialogs.ConfirmActionPopup") as confirm_popup:
+            popup.submit()
+
+        self.assertIn("0 次训练", confirm_popup.call_args.args[1])
+        self.assertIn("替换本机全部数据", confirm_popup.call_args.args[1])
+
+    def test_backup_restore_exports_current_data_before_replacing_it(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = FitnessStore(Path(temp_dir) / "records.json")
+            store.add_workout(
+                "2026-11-19",
+                "当前训练",
+                ["胸"],
+                [{"name": "卧推", "sets": 2, "reps": 8, "weight": 60}],
+            )
+            app = SimpleNamespace(
+                store=store,
+                user_data_dir=temp_dir,
+            )
+            screen = CalendarHistoryScreen(app)
+            screen.notify = Mock()
+            document = {
+                "version": 2,
+                "plans": [],
+                "workouts": [],
+                "body_weights": [],
+                "rest_days": [],
+            }
+
+            with patch(
+                "fitness_ui.screens.export_json",
+                return_value=Path(temp_dir) / "pre_restore.json",
+            ) as export:
+                screen._restore_backup(document)
+
+            export.assert_called_once()
+            self.assertEqual(export.call_args.args[0]["workouts"][0]["title"], "当前训练")
+            self.assertEqual(export.call_args.args[1], temp_dir)
+            self.assertEqual(store.data["workouts"], [])
 
     def test_page_scroll_tracks_screen_size(self):
         screen = FitnessScreen(Mock())

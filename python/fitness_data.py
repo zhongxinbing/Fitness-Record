@@ -330,6 +330,50 @@ class FitnessStore:
                     LOGGER.warning("Could not remove temporary fitness data file %s", temporary, exc_info=True)
         self.data = updated_data
 
+    @staticmethod
+    def validate_backup_document(value: Any) -> dict[str, Any]:
+        return FitnessStore._validate_document(value)
+
+    def restore_backup(self, value: Any) -> Path | None:
+        normalized = self._validate_document(value)
+        backup_path = None
+        if self.path.exists():
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+            backup_path = self.path.with_name(
+                f"{self.path.stem}_before_restore_{timestamp}{self.path.suffix}"
+            )
+            temporary: Path | None = None
+            try:
+                with tempfile.NamedTemporaryFile(
+                    mode="wb",
+                    dir=self.path.parent,
+                    prefix=f".{backup_path.name}.",
+                    suffix=".tmp",
+                    delete=False,
+                ) as stream:
+                    temporary = Path(stream.name)
+                    stream.write(self.path.read_bytes())
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                os.replace(temporary, backup_path)
+                temporary = None
+            except OSError as error:
+                raise FitnessStoreError(
+                    f"无法保留恢复前的数据快照，未更改现有记录：{error}"
+                ) from error
+            finally:
+                if temporary is not None:
+                    try:
+                        temporary.unlink(missing_ok=True)
+                    except OSError:
+                        LOGGER.warning(
+                            "Could not remove temporary pre-restore file %s",
+                            temporary,
+                            exc_info=True,
+                        )
+        self._save(normalized)
+        return backup_path
+
     def add_workout(
         self,
         training_date: str,
@@ -462,6 +506,53 @@ class FitnessStore:
             }
             updated_data["workouts"].append(workout)
         updated_data["rest_days"] = rest_days
+        self._save(updated_data)
+        return workout
+
+    def add_historical_exercise(
+        self,
+        training_date: str,
+        body_part: str,
+        exercise: dict[str, Any],
+    ) -> dict[str, Any]:
+        clean_date = _valid_date(training_date)
+        if clean_date >= date.today().isoformat():
+            raise ValueError("历史补录日期必须早于今天")
+        clean_part = str(body_part).strip()
+        if not clean_part:
+            raise ValueError("请先选择训练部位")
+        normalized = _exercise(exercise)
+        normalized["set_log"] = _set_log(normalized, True)
+
+        updated_data = deepcopy(self.data)
+        updated_data["rest_days"] = [
+            item for item in updated_data["rest_days"] if item["date"] != clean_date
+        ]
+        workout = next(
+            (
+                item for item in reversed(updated_data["workouts"])
+                if item["date"] == clean_date and item.get("backfilled", False)
+            ),
+            None,
+        )
+        if workout is None:
+            workout = {
+                "id": uuid.uuid4().hex,
+                "date": clean_date,
+                "training_time": "",
+                "title": "历史补录",
+                "body_parts": [clean_part],
+                "exercises": [normalized],
+                "notes": "",
+                "finished": True,
+                "backfilled": True,
+            }
+            updated_data["workouts"].append(workout)
+        else:
+            workout["body_parts"] = list(dict.fromkeys(
+                [*workout["body_parts"], clean_part]
+            ))
+            workout["exercises"].append(normalized)
         self._save(updated_data)
         return workout
 

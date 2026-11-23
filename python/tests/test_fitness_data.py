@@ -1,5 +1,7 @@
+import json
 import tempfile
 import unittest
+from datetime import date, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
@@ -287,6 +289,67 @@ class FitnessStoreTests(unittest.TestCase):
                 {"weight": 50.0, "reps": 10, "completed": False},
             ],
         )
+
+    def test_historical_exercises_are_grouped_as_completed_workout(self):
+        yesterday = (date.today() - timedelta(days=1)).isoformat()
+        self.store.set_rest_day(yesterday, True)
+
+        self.store.add_historical_exercise(
+            yesterday,
+            "胸",
+            {"name": "卧推", "sets": 3, "reps": 8, "weight": 60},
+        )
+        self.store.add_historical_exercise(
+            yesterday,
+            "背",
+            {"name": "划船", "sets": 3, "reps": 10, "weight": 40},
+        )
+
+        workout = self.store.data["workouts"][0]
+        self.assertEqual(len(self.store.data["workouts"]), 1)
+        self.assertEqual(workout["title"], "历史补录")
+        self.assertTrue(workout["finished"])
+        self.assertEqual(workout["training_time"], "")
+        self.assertEqual(workout["body_parts"], ["胸", "背"])
+        self.assertTrue(
+            all(
+                entry["completed"]
+                for exercise in workout["exercises"]
+                for entry in exercise["set_log"]
+            )
+        )
+        self.assertEqual(self.store.data["rest_days"], [])
+        with self.assertRaises(ValueError):
+            self.store.add_historical_exercise(
+                date.today().isoformat(),
+                "胸",
+                {"name": "卧推", "sets": 1, "reps": 1, "weight": 1},
+            )
+
+    def test_restoring_backup_keeps_snapshot_and_rejects_invalid_document(self):
+        workout = self.store.add_daily_exercise(
+            "2026-11-19",
+            "胸",
+            {"name": "卧推", "sets": 2, "reps": 8, "weight": 60},
+        )
+        empty_backup = {
+            "version": 2,
+            "plans": [],
+            "workouts": [],
+            "body_weights": [],
+            "rest_days": [],
+        }
+
+        snapshot = self.store.restore_backup(empty_backup)
+
+        self.assertIsNotNone(snapshot)
+        self.assertTrue(snapshot.exists())
+        saved_before_restore = json.loads(snapshot.read_text(encoding="utf-8"))
+        self.assertEqual(saved_before_restore["workouts"][0]["id"], workout["id"])
+        self.assertEqual(self.store.data["workouts"], [])
+        with self.assertRaises(ValueError):
+            self.store.restore_backup({"version": 99})
+        self.assertEqual(self.store.data["workouts"], [])
 
     def test_rest_day_and_calendar_summary_are_consistent(self):
         workout = self.store.add_daily_exercise(
