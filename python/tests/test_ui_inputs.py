@@ -13,12 +13,14 @@ from kivy.uix.label import Label
 from kivy.uix.widget import Widget
 
 from fitness_data import FitnessStore
-from fitness_ui.app import FitnessRecordApp
+from fitness_ui.app import FitnessRecordApp, RestTimerPopup
 from fitness_ui.dialogs import (
     BackupImportPopup,
     ExerciseEditorPopup,
     ExerciseEntryPopup,
+    WorkoutTemplatePreviewPopup,
     WorkoutDetailsPopup,
+    WorkoutTemplateEditorPopup,
 )
 from fitness_ui.screens import (
     CalendarHistoryScreen,
@@ -105,10 +107,38 @@ class TextInputTests(unittest.TestCase):
             },
             "胸",
         )
+        cancel = next(
+            widget
+            for widget in popup.walk()
+            if isinstance(widget, AppButton) and widget.text == "取消"
+        )
+        popup.dismiss = Mock()
+        cancel.dispatch("on_release")
+        popup.dismiss.assert_called_once_with()
+
+    def test_action_sheet_requires_confirmation_for_duplicate_exercises(self):
+        on_add = Mock(return_value=True)
+        popup = ExerciseEntryPopup(
+            on_add,
+            Mock(return_value=True),
+            find_duplicates=lambda _exercise, _part: ["卧推"],
+        )
+        popup.name_input.text = "卧推"
+        popup.weight_input.text = "60"
+        popup.sets_input.text = "4"
+        popup.reps_input.text = "8"
+        popup.rest_input.text = "90"
+
+        with patch("fitness_ui.dialogs.ConfirmActionPopup") as confirm_popup:
+            popup.confirm_add()
+
+        on_add.assert_not_called()
+        self.assertIn("卧推", confirm_popup.call_args.args[1])
+        confirm_popup.call_args.args[3]()
+        on_add.assert_called_once()
 
     def test_workout_set_rows_toggle_completion(self):
         on_edit = Mock()
-        on_rest = Mock()
         on_toggle = Mock()
         on_add_set = Mock()
         card = ExerciseLogCard(
@@ -127,7 +157,6 @@ class TextInputTests(unittest.TestCase):
             is_record=False,
             finished=False,
             on_edit=on_edit,
-            on_rest=on_rest,
             on_toggle_set=on_toggle,
             on_edit_set=Mock(),
             on_add_set=on_add_set,
@@ -145,14 +174,8 @@ class TextInputTests(unittest.TestCase):
         next(
             widget
             for widget in card.walk()
-            if isinstance(widget, AppButton) and widget.text == "休息 90 秒"
-        ).dispatch("on_release")
-        next(
-            widget
-            for widget in card.walk()
             if isinstance(widget, AppButton) and widget.text == "+ 添加一组"
         ).dispatch("on_release")
-        on_rest.assert_called_once_with()
         on_add_set.assert_called_once_with()
         self.assertTrue(
             any(
@@ -160,11 +183,11 @@ class TextInputTests(unittest.TestCase):
                 for widget in card.walk()
             )
         )
-        card.update_rest_timer(45)
-        self.assertEqual(card.rest_button.text, "剩余 00:45")
+        card.update_rest_timer(45, 0)
+        self.assertEqual(card.set_buttons[0].text, "00:45\n点击结束")
+        self.assertEqual(card.set_buttons[1].text, "已完成")
         card.update_rest_timer(None)
-        self.assertEqual(card.rest_button.text, "休息 90 秒")
-        self.assertGreaterEqual(card.rest_button.height, 44)
+        self.assertEqual(card.set_buttons[0].text, "开始计时")
         self.assertFalse(
             any(
                 isinstance(widget, AppButton) and widget.text == "删除"
@@ -285,13 +308,18 @@ class TextInputTests(unittest.TestCase):
                 )
             )
             card = screen.exercise_cards[0]
+            screen._rest_timer_target = (workout["id"], 0, 0)
             screen.update_rest_timer(
                 {"status": "running", "exercise": "卧推"},
                 45,
             )
-            self.assertEqual(card.rest_button.text, "剩余 00:45")
+            self.assertEqual(card.set_buttons[0].text, "00:45\n点击结束")
+            self.assertFalse(any(
+                getattr(widget, "text", "") == "打开计时"
+                for widget in screen.walk()
+            ))
             screen.update_rest_timer(None, 0)
-            self.assertEqual(card.rest_button.text, "休息 60 秒")
+            self.assertEqual(card.set_buttons[0].text, "开始计时")
 
             self.assertTrue(
                 screen._save_workout_details(workout["id"], "周一推训练", "状态不错")
@@ -299,7 +327,51 @@ class TextInputTests(unittest.TestCase):
             self.assertEqual(screen.session_title.text, "周一推训练")
             self.assertEqual(screen.session_notes.text, "状态不错")
 
-    def test_tapping_rest_during_a_running_timer_reopens_that_timer(self):
+    def test_restored_timer_appears_on_matching_completed_set_button(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = FitnessStore(Path(temp_dir) / "records.json")
+            workout = store.add_daily_exercise(
+                date.today().isoformat(),
+                "背",
+                {"name": "高位下拉", "sets": 2, "reps": 12, "weight": 30},
+            )
+            store.update_workout_set(workout["id"], 0, 0, completed=True)
+            timer_state = {"status": "running", "exercise": "高位下拉"}
+            screen = WorkoutScreen(
+                SimpleNamespace(
+                    store=store,
+                    rest_timer_snapshot=lambda: (timer_state, 37),
+                )
+            )
+            screen.refresh_today()
+
+        self.assertEqual(screen._rest_timer_target, (workout["id"], 0, 0))
+        self.assertEqual(screen.exercise_cards[0].set_buttons[0].text, "00:37\n点击结束")
+        self.assertEqual(screen.exercise_cards[0].set_buttons[1].text, "开始计时")
+
+    def test_minimizing_rest_timer_keeps_countdown_running(self):
+        controller = Mock()
+        controller.state = {"status": "running", "exercise": "卧推", "duration": 60}
+        controller._remaining.return_value = 30
+        popup = RestTimerPopup(
+            SimpleNamespace(timer_controller=controller, timer_popup=None)
+        )
+        popup.dismiss = Mock()
+
+        popup.minimize()
+
+        popup.dismiss.assert_called_once_with()
+        controller.cancel.assert_not_called()
+        popup._restore_screensaver()
+
+        app = FitnessRecordApp()
+        app.workout_screen = Mock()
+        app.timer_popup = None
+        app.update_rest_timer(controller.state, 25)
+        self.assertIsNone(app.timer_popup)
+        app.workout_screen.update_rest_timer.assert_called_once_with(controller.state, 25)
+
+    def test_tapping_rest_during_a_running_timer_does_not_open_a_popup(self):
         controller = Mock()
         controller.state = {"status": "running", "exercise": "高位下拉"}
         app = SimpleNamespace(
@@ -312,7 +384,7 @@ class TextInputTests(unittest.TestCase):
         screen.start_rest_timer({"name": "高位下拉", "rest_seconds": 60})
 
         controller.start.assert_not_called()
-        app.open_rest_timer.assert_called_once_with()
+        app.open_rest_timer.assert_not_called()
 
     def test_start_set_button_marks_set_done_and_starts_rest_timer(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -332,11 +404,7 @@ class TextInputTests(unittest.TestCase):
             )
             screen = WorkoutScreen(app)
             screen.refresh_today()
-            next(
-                widget
-                for widget in screen.exercise_cards[0].walk()
-                if isinstance(widget, AppButton) and widget.text == "开始计时"
-            ).dispatch("on_release")
+            screen.exercise_cards[0].set_buttons[0].dispatch("on_release")
 
             self.assertTrue(store.data["workouts"][0]["exercises"][0]["set_log"][0]["completed"])
             self.assertTrue(
@@ -346,7 +414,237 @@ class TextInputTests(unittest.TestCase):
                 )
             )
             controller.start.assert_called_once_with("高位下拉", 60)
-            app.open_rest_timer.assert_called_once_with()
+            app.open_rest_timer.assert_not_called()
+            controller.state = {"status": "running", "exercise": "高位下拉"}
+            screen.update_rest_timer(controller.state, 45)
+            self.assertEqual(
+                screen.exercise_cards[0].set_buttons[0].text,
+                "00:45\n点击结束",
+            )
+            screen.exercise_cards[0].set_buttons[0].dispatch("on_release")
+            controller.cancel.assert_called_once_with()
+            self.assertTrue(
+                store.data["workouts"][0]["exercises"][0]["set_log"][0]["completed"]
+            )
+            screen.update_rest_timer(None, 0)
+            self.assertEqual(screen.exercise_cards[0].set_buttons[0].text, "已完成")
+
+    def test_template_shortcut_routes_selection_through_library_flow(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = FitnessStore(Path(temp_dir) / "records.json")
+            template = store.add_plan(
+                "推胸日",
+                ["胸"],
+                [{"name": "卧推", "sets": 3, "reps": 8, "weight": 60}],
+            )
+            library_screen = SimpleNamespace(add_template_to_today=Mock())
+            screen = WorkoutScreen(
+                SimpleNamespace(store=store, library_screen=library_screen)
+            )
+
+            with patch("fitness_ui.screens.WorkoutTemplatePickerPopup") as picker:
+                screen.open_template_picker()
+
+            self.assertEqual(screen.template_button.text, "从模板开始")
+            self.assertEqual(screen.add_action_button.text, "记录新动作")
+            picker.assert_called_once()
+            picker.call_args.args[1](template)
+            library_screen.add_template_to_today.assert_called_once_with(template)
+
+    def test_added_set_reuses_previous_values_and_scrolls_to_next_set(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = FitnessStore(Path(temp_dir) / "records.json")
+            workout = store.add_daily_exercise(
+                date.today().isoformat(),
+                "胸",
+                {
+                    "name": "卧推",
+                    "sets": 2,
+                    "reps": 8,
+                    "weight": 60,
+                    "rest_seconds": 0,
+                },
+            )
+            screen = WorkoutScreen(
+                SimpleNamespace(
+                    store=store,
+                    rest_timer_snapshot=lambda: (None, 0),
+                    timer_controller=Mock(state=None),
+                )
+            )
+            screen.refresh_today()
+
+            with patch.object(screen.scroll, "scroll_to") as scroll_to:
+                screen.add_set(workout["id"], 0)
+                Clock.tick()
+
+                added = store.data["workouts"][0]["exercises"][0]["set_log"][-1]
+                self.assertEqual((added["weight"], added["reps"]), (60.0, 8))
+                scroll_to.assert_called_once()
+                self.assertIs(
+                    scroll_to.call_args.args[0],
+                    screen.exercise_cards[0].set_rows[2],
+                )
+
+                scroll_to.reset_mock()
+                screen.toggle_set(
+                    workout["id"],
+                    0,
+                    0,
+                    True,
+                    store.data["workouts"][0]["exercises"][0],
+                )
+                Clock.tick()
+                scroll_to.assert_called_once()
+                self.assertIs(
+                    scroll_to.call_args.args[0],
+                    screen.exercise_cards[0].set_rows[1],
+                )
+
+    def test_workout_can_be_paused_and_resumed_from_header(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = FitnessStore(Path(temp_dir) / "records.json")
+            workout = store.add_daily_exercise(
+                date.today().isoformat(),
+                "胸",
+                {"name": "卧推", "sets": 2, "reps": 8, "weight": 60},
+            )
+            screen = WorkoutScreen(SimpleNamespace(store=store))
+            screen.refresh_today()
+
+            screen.toggle_workout_pause()
+
+            self.assertEqual(screen.header_title.text, "已暂停")
+            self.assertEqual(screen.pause_button.text, "继续")
+            self.assertIsNotNone(store.data["workouts"][0].get("paused_at"))
+
+            screen.toggle_workout_pause()
+
+            self.assertEqual(screen.pause_button.text, "暂停")
+            self.assertNotIn("paused_at", store.data["workouts"][0])
+            self.assertIsNotNone(store.active_workout(date.today().isoformat()))
+
+    def test_exercise_order_can_be_changed_from_action_card(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = FitnessStore(Path(temp_dir) / "records.json")
+            workout = store.add_daily_exercises(
+                date.today().isoformat(),
+                ["胸", "背"],
+                [
+                    {"name": "卧推", "sets": 2, "reps": 8, "weight": 60},
+                    {"name": "划船", "sets": 2, "reps": 10, "weight": 40},
+                ],
+            )
+            screen = WorkoutScreen(SimpleNamespace(store=store))
+            screen.refresh_today()
+
+            move_down = next(
+                widget
+                for widget in screen.exercise_cards[0].walk()
+                if isinstance(widget, AppButton) and widget.text == "下移"
+            )
+            move_down.dispatch("on_release")
+
+            self.assertEqual(
+                [item["name"] for item in store.active_workout(workout["date"])["exercises"]],
+                ["划船", "卧推"],
+            )
+
+    def test_recent_exercise_reopens_prefilled_form_with_unchecked_sets(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = FitnessStore(Path(temp_dir) / "records.json")
+            store.add_workout(
+                "2026-11-19",
+                "胸部训练",
+                ["胸"],
+                [{"name": "卧推", "sets": 2, "reps": 8, "weight": 60}],
+            )
+            screen = WorkoutScreen(SimpleNamespace(store=store))
+
+            with patch("fitness_ui.screens.RecentExercisePickerPopup") as picker:
+                screen.open_recent_action_picker()
+
+            item = picker.call_args.args[0][0]
+            self.assertEqual(item["exercise"]["name"], "卧推")
+            with patch("fitness_ui.screens.ExerciseEntryPopup") as entry_popup:
+                picker.call_args.args[1](item)
+
+            entry_popup.assert_called_once()
+            self.assertEqual(entry_popup.call_args.kwargs["initial_part"], "胸")
+            self.assertTrue(
+                all(
+                    not item["completed"]
+                    for item in entry_popup.call_args.kwargs["initial_exercise"]["set_log"]
+                )
+            )
+
+    def test_reusing_recent_exercise_preserves_set_values_and_resets_completion(self):
+        exercise = {
+            "name": "卧推",
+            "sets": 2,
+            "reps": 8,
+            "weight": 67.5,
+            "rest_seconds": 90,
+            "alternatives": [],
+            "set_log": [
+                {"weight": 65, "reps": 8, "completed": False},
+                {"weight": 70, "reps": 6, "completed": True},
+            ],
+        }
+        popup = ExerciseEntryPopup(
+            Mock(return_value=True),
+            Mock(return_value=True),
+            initial_exercise=exercise,
+            initial_part="胸",
+        )
+
+        values = popup._values()
+        self.assertEqual(
+            [(item["weight"], item["reps"], item["completed"]) for item in values["set_log"]],
+            [(65, 8, False), (70, 6, False)],
+        )
+        popup.weight_input.text = "72.5"
+        changed_values = popup._values()
+        self.assertEqual(
+            [(item["weight"], item["reps"]) for item in changed_values["set_log"]],
+            [(72.5, 8), (72.5, 6)],
+        )
+
+    def test_rest_day_action_is_hidden_when_today_has_a_workout(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = FitnessStore(Path(temp_dir) / "records.json")
+            store.add_daily_exercise(
+                date.today().isoformat(),
+                "胸",
+                {"name": "卧推", "sets": 2, "reps": 8, "weight": 60},
+            )
+            screen = WorkoutScreen(SimpleNamespace(store=store))
+            screen.refresh_today()
+
+            self.assertFalse(
+                any(
+                    isinstance(widget, AppButton)
+                    and widget.text == "今天太累，休息一天"
+                    for widget in screen.content.walk()
+                )
+            )
+
+    def test_deleted_last_action_can_be_undone_from_today_screen(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = FitnessStore(Path(temp_dir) / "records.json")
+            workout = store.add_daily_exercise(
+                date.today().isoformat(),
+                "胸",
+                {"name": "卧推", "sets": 2, "reps": 8, "weight": 60},
+            )
+            screen = WorkoutScreen(SimpleNamespace(store=store))
+
+            screen.remove_exercise(workout["id"], 0)
+            self.assertEqual(store.data["workouts"], [])
+
+            screen.undo_banner.undo()
+            self.assertEqual(store.data["workouts"][0]["id"], workout["id"])
+            self.assertEqual(store.data["workouts"][0]["exercises"][0]["name"], "卧推")
 
     def test_finishing_workout_requires_confirmation_when_sets_are_incomplete(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -373,21 +671,25 @@ class TextInputTests(unittest.TestCase):
                     if item["id"] == workout["id"]
                 )["finished"]
             )
+            self.assertEqual(screen.undo_banner.message.text, "训练已结束")
+            screen.undo_banner.undo()
+            self.assertIsNotNone(store.active_workout(date.today().isoformat()))
 
-    def test_undoing_set_completion_cancels_same_exercise_timer(self):
+    def test_undoing_another_set_keeps_active_timer_running(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             store = FitnessStore(Path(temp_dir) / "records.json")
             workout = store.add_daily_exercise(
                 date.today().isoformat(),
                 "胸",
-                {"name": "卧推", "sets": 1, "reps": 8, "weight": 60},
+                {"name": "卧推", "sets": 2, "reps": 8, "weight": 60},
             )
-            store.update_workout_set(
-                workout["id"],
-                0,
-                0,
-                completed=True,
-            )
+            for set_index in (0, 1):
+                store.update_workout_set(
+                    workout["id"],
+                    0,
+                    set_index,
+                    completed=True,
+                )
             controller = Mock()
             controller.state = {"status": "running", "exercise": "卧推"}
             app = SimpleNamespace(
@@ -396,6 +698,7 @@ class TextInputTests(unittest.TestCase):
                 rest_timer_snapshot=lambda: (None, 0),
             )
             screen = WorkoutScreen(app)
+            screen._rest_timer_target = (workout["id"], 0, 1)
             exercise = store.data["workouts"][0]["exercises"][0]
 
             screen.toggle_set(
@@ -409,7 +712,10 @@ class TextInputTests(unittest.TestCase):
             self.assertFalse(
                 store.data["workouts"][0]["exercises"][0]["set_log"][0]["completed"]
             )
-            controller.cancel.assert_called_once_with()
+            controller.cancel.assert_not_called()
+            self.assertTrue(
+                store.data["workouts"][0]["exercises"][0]["set_log"][1]["completed"]
+            )
 
     def test_history_shows_each_set_notes_and_duration(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -483,6 +789,73 @@ class TextInputTests(unittest.TestCase):
                 [item["title"] for item in store.data["plans"]],
                 ["推胸日"],
             )
+            screen.undo_banner.undo()
+            self.assertEqual(
+                [item["title"] for item in store.data["plans"]],
+                ["推胸日", "腿部训练"],
+            )
+
+    def test_library_can_create_and_edit_templates(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = FitnessStore(Path(temp_dir) / "records.json")
+            screen = LibraryScreen(SimpleNamespace(store=store))
+            self.assertEqual(screen.add_template_button.text, "+")
+
+            with patch("fitness_ui.screens.WorkoutTemplateEditorPopup") as editor:
+                screen.create_template()
+                create_callback = editor.call_args.args[1]
+                create_callback(
+                    "推胸日",
+                    ["胸"],
+                    [{"name": "卧推", "sets": 3, "reps": 8, "weight": 40}],
+                )
+
+            template = store.data["plans"][0]
+            self.assertEqual(template["title"], "推胸日")
+            self.assertEqual(template["exercises"][0]["name"], "卧推")
+            self.assertEqual(len(screen.template_list.children), 1)
+
+            with patch("fitness_ui.screens.WorkoutTemplateEditorPopup") as editor:
+                screen.edit_template(template["id"])
+                edit_callback = editor.call_args.args[1]
+                edit_callback(
+                    "上肢力量",
+                    ["背"],
+                    [{"name": "划船", "sets": 4, "reps": 10, "weight": 35}],
+                )
+
+            persisted = FitnessStore(store.path).data["plans"][0]
+            self.assertEqual(persisted["id"], template["id"])
+            self.assertEqual(persisted["title"], "上肢力量")
+            self.assertEqual(persisted["body_parts"], ["背"])
+            self.assertEqual(persisted["exercises"][0]["name"], "划船")
+
+    def test_template_editor_manages_multiple_configured_exercises(self):
+        on_save = Mock(return_value=True)
+        popup = WorkoutTemplateEditorPopup(None, on_save)
+        popup.title_input.text = "上肢训练"
+        popup.toggle_part("背")
+        popup._append_exercise(
+            {"name": "卧推", "sets": 3, "reps": 8, "weight": 40},
+            "胸",
+        )
+        popup._append_exercise(
+            {"name": "划船", "sets": 4, "reps": 10, "weight": 35},
+            "背",
+        )
+        with patch("fitness_ui.dialogs.ExerciseEditorPopup") as editor:
+            popup._edit_exercise(0)
+            editor.call_args.args[1](
+                {"name": "上斜卧推", "sets": 4, "reps": 8, "weight": 30}
+            )
+        popup._remove_exercise(1)
+        popup.save()
+
+        on_save.assert_called_once_with(
+            "上肢训练",
+            ["胸", "背"],
+            [{"name": "上斜卧推", "sets": 4, "reps": 8, "weight": 30}],
+        )
 
     def test_adding_template_after_completed_session_requires_confirmation(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -505,13 +878,111 @@ class TextInputTests(unittest.TestCase):
             )
             screen = LibraryScreen(app)
 
-            with patch("fitness_ui.screens.ConfirmActionPopup") as confirm_popup:
+            with (
+                patch("fitness_ui.screens.WorkoutTemplatePreviewPopup") as preview_popup,
+                patch("fitness_ui.screens.ConfirmActionPopup") as confirm_popup,
+            ):
                 screen.add_template_to_today(template)
+                self.assertIsNone(store.active_workout(today))
+                preview_popup.call_args.args[2]()
 
             self.assertIsNone(store.active_workout(today))
             self.assertIn("新建一条训练记录", confirm_popup.call_args.args[1])
             confirm_popup.call_args.args[3]()
             self.assertIsNotNone(store.active_workout(today))
+
+    def test_template_preview_lists_actions_and_warns_about_duplicates(self):
+        template = {
+            "title": "推胸日",
+            "body_parts": ["胸"],
+            "exercises": [
+                {"name": "卧推", "sets": 4, "reps": 8, "weight": 60, "rest_seconds": 90},
+                {"name": "飞鸟", "sets": 3, "reps": 12, "weight": 15, "rest_seconds": 60},
+            ],
+        }
+        popup = WorkoutTemplatePreviewPopup(template, ["卧推"], Mock())
+        labels = [
+            widget.text
+            for widget in popup.walk()
+            if isinstance(widget, Label)
+        ]
+        buttons = [
+            widget.text
+            for widget in popup.walk()
+            if isinstance(widget, AppButton)
+        ]
+
+        self.assertIn("1. 卧推", labels)
+        self.assertIn("2. 飞鸟", labels)
+        self.assertTrue(any("继续添加会重复" in text for text in labels))
+        self.assertIn("仍要添加", buttons)
+
+    def test_history_can_edit_sets_and_undo_workout_deletion(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = FitnessStore(Path(temp_dir) / "records.json")
+            workout = store.add_workout(
+                date.today().isoformat(),
+                "今日训练",
+                ["胸"],
+                [{"name": "卧推", "sets": 2, "reps": 8, "weight": 60}],
+            )
+            screen = CalendarHistoryScreen(SimpleNamespace(store=store))
+            screen.render()
+
+            with patch("fitness_ui.screens.SetEntryPopup") as edit_popup:
+                screen.edit_historical_set(
+                    workout["id"],
+                    0,
+                    0,
+                    store.data["workouts"][0]["exercises"][0]["set_log"][0],
+                )
+                edit_popup.call_args.args[2](65, 9)
+
+            self.assertEqual(
+                store.data["workouts"][0]["exercises"][0]["set_log"][0]["weight"],
+                65.0,
+            )
+            with patch("fitness_ui.screens.ConfirmActionPopup") as confirm_popup:
+                screen.delete_historical_workout(workout["id"])
+                confirm_popup.call_args.args[3]()
+
+            self.assertEqual(store.data["workouts"], [])
+            screen.undo_banner.undo()
+            self.assertEqual(store.data["workouts"][0]["id"], workout["id"])
+    def test_adding_template_previews_and_detects_existing_action_names(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = FitnessStore(Path(temp_dir) / "records.json")
+            today = date.today().isoformat()
+            store.add_daily_exercise(
+                today,
+                "胸",
+                {"name": "卧推", "sets": 3, "reps": 8, "weight": 60},
+            )
+            template = store.add_plan(
+                "推胸日",
+                ["胸"],
+                [
+                    {"name": "卧推", "sets": 4, "reps": 8, "weight": 65},
+                    {"name": "飞鸟", "sets": 3, "reps": 12, "weight": 15},
+                ],
+            )
+            screen = LibraryScreen(
+                SimpleNamespace(
+                    store=store,
+                    workout_screen=SimpleNamespace(refresh_today=Mock()),
+                )
+            )
+
+            with patch("fitness_ui.screens.WorkoutTemplatePreviewPopup") as preview_popup:
+                screen.add_template_to_today(template)
+                self.assertEqual(preview_popup.call_args.args[1], ["卧推"])
+                self.assertEqual(len(store.active_workout(today)["exercises"]), 1)
+                preview_popup.call_args.args[2]()
+
+            self.assertEqual(
+                [item["name"] for item in store.active_workout(today)["exercises"]],
+                ["卧推", "卧推", "飞鸟"],
+            )
 
     def test_history_can_backfill_a_past_date(self):
         with tempfile.TemporaryDirectory() as temp_dir:

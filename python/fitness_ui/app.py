@@ -1,4 +1,4 @@
-"""Application shell with three-tab navigation and a full-screen rest timer."""
+"""Application shell with three-tab navigation and inline rest timing."""
 
 from __future__ import annotations
 
@@ -85,6 +85,15 @@ class RestTimerPopup(Popup):
         )
         content.add_widget(actions)
         content.add_widget(
+            make_button(
+                "返回训练 · 计时继续",
+                self.minimize,
+                height=46,
+                tone="neutral",
+                font_size=13,
+            )
+        )
+        content.add_widget(
             make_label("计时期间保持屏幕常亮；结束时通过系统提醒通知。", 12, TEXT, 32)
         )
         super().__init__(
@@ -123,6 +132,9 @@ class RestTimerPopup(Popup):
         except ValueError as error:
             self.app_ref.workout_screen.notify(str(error))
             return
+        self.dismiss()
+
+    def minimize(self, *_: object) -> None:
         self.dismiss()
 
     def _restore_screensaver(self, *_: object) -> None:
@@ -205,8 +217,6 @@ class FitnessRecordApp(App):
             if self.timer_popup is not None:
                 self.timer_popup.dismiss()
             return
-        if self.timer_popup is None:
-            self.open_rest_timer()
         if self.timer_popup is not None:
             self.timer_popup.refresh(state, remaining)
 

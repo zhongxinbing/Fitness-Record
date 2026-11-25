@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from kivy.clock import Clock
 from kivy.graphics import Color, RoundedRectangle
 from kivy.metrics import dp
 from kivy.uix.boxlayout import BoxLayout
@@ -175,6 +176,53 @@ def make_button(
         font_size=font_size,
         **kwargs,
     )
+
+
+class UndoBanner(SurfaceCard):
+    def __init__(self):
+        super().__init__(
+            orientation="horizontal",
+            size_hint_y=None,
+            height=0,
+            spacing=dp(8),
+            padding=(dp(10), dp(3)),
+            opacity=0,
+        )
+        self.message = make_label("", 12, TEXT, 40, shorten=True)
+        self.add_widget(self.message)
+        self.undo_button = make_button(
+            "撤销",
+            self.undo,
+            height=40,
+            tone="secondary",
+            font_size=12,
+        )
+        self.undo_button.size_hint_x = None
+        self.undo_button.width = dp(58)
+        self.add_widget(self.undo_button)
+        self._undo_action: Any = None
+        self._timeout_event = None
+
+    def show(self, message: str, undo_action: Any, duration: float = 6) -> None:
+        if self._timeout_event is not None:
+            self._timeout_event.cancel()
+        self.message.text = message
+        self._undo_action = undo_action
+        self.height = dp(48)
+        self.opacity = 1
+        self._timeout_event = Clock.schedule_once(self.hide, duration)
+
+    def hide(self, *_: Any) -> None:
+        self._timeout_event = None
+        self._undo_action = None
+        self.height = 0
+        self.opacity = 0
+
+    def undo(self, *_: Any) -> None:
+        undo_action = self._undo_action
+        self.hide()
+        if undo_action is not None:
+            undo_action()
 
 
 def make_input(

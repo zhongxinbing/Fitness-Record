@@ -42,16 +42,34 @@ class ExerciseEntryPopup(Popup):
         self,
         on_add: Callable[[dict[str, Any], str], bool],
         on_save_template: Callable[[dict[str, Any], str], bool],
+        *,
+        initial_exercise: dict[str, Any] | None = None,
+        initial_part: str | None = None,
+        find_duplicates: Callable[[dict[str, Any], str], list[str]] | None = None,
+        show_save_template: bool = True,
     ):
         self.on_add = on_add
         self.on_save_template = on_save_template
-        self.selected_part = "胸"
+        self.initial_exercise = dict(initial_exercise) if initial_exercise else None
+        self.find_duplicates = find_duplicates
+        self.selected_part = initial_part if initial_part in PARTS else "胸"
         body = BoxLayout(orientation="vertical", spacing=dp(8), padding=dp(14))
         scroll = ScrollView(do_scroll_x=False)
         form = BoxLayout(orientation="vertical", size_hint_y=None, spacing=dp(10))
         form.bind(minimum_height=form.setter("height"))
-        form.add_widget(make_label("动作名称", 14, MUTED, 26, True))
-        self.name_input = make_input("例如：杠铃卧推")
+        form.add_widget(
+            make_label(
+                "基于最近记录，可修改后添加"
+                if self.initial_exercise is not None
+                else "动作名称",
+                14,
+                MUTED,
+                26,
+                True,
+            )
+        )
+        initial = self.initial_exercise or {}
+        self.name_input = make_input("例如：杠铃卧推", initial.get("name", ""))
         form.add_widget(self.name_input)
         form.add_widget(make_label("训练部位（单选）", 14, MUTED, 26, True))
         part_grid = GridLayout(
@@ -72,16 +90,33 @@ class ExerciseEntryPopup(Popup):
         form.add_widget(part_grid)
         form.add_widget(make_label("重量（kg） / 组数 / 每组次数", 14, MUTED, 26, True))
         measurements = GridLayout(cols=3, spacing=dp(6), size_hint_y=None, height=dp(50))
-        self.weight_input = make_input("60", numeric=True)
-        self.sets_input = make_input("4", "4", numeric=True)
-        self.reps_input = make_input("次数", "8", numeric=True)
+        self.weight_input = make_input(
+            "60",
+            str(initial["weight"]) if initial else "",
+            numeric=True,
+        )
+        self.sets_input = make_input(
+            "4",
+            str(initial.get("sets", 4)),
+            numeric=True,
+        )
+        self.reps_input = make_input(
+            "次数",
+            str(initial.get("reps", 8)),
+            numeric=True,
+        )
         for field in (self.weight_input, self.sets_input, self.reps_input):
             measurements.add_widget(field)
         form.add_widget(measurements)
-        self.rest_input = make_input("默认休息时间（秒）", "90", numeric=True)
+        self.rest_input = make_input(
+            "默认休息时间（秒）",
+            str(initial.get("rest_seconds", 90)),
+            numeric=True,
+        )
         form.add_widget(self.rest_input)
         self.alternatives_input = make_input(
             "备选动作（可选，用逗号或换行分隔）",
+            "、".join(initial.get("alternatives", [])),
             multiline=True,
         )
         form.add_widget(self.alternatives_input)
@@ -90,14 +125,42 @@ class ExerciseEntryPopup(Popup):
         scroll.add_widget(form)
         body.add_widget(scroll)
 
-        actions = GridLayout(cols=2, spacing=dp(8), size_hint_y=None, height=dp(50))
-        actions.add_widget(make_button("确认添加", self.confirm_add, height=50))
+        actions = BoxLayout(
+            orientation="vertical",
+            spacing=dp(6),
+            size_hint_y=None,
+            height=dp(102),
+        )
+        submit_actions = GridLayout(
+            cols=2 if show_save_template else 1,
+            spacing=dp(8),
+            size_hint_y=None,
+            height=dp(50),
+        )
+        submit_actions.add_widget(
+            make_button(
+                "确认添加" if show_save_template else "添加动作",
+                self.confirm_add,
+                height=50,
+            )
+        )
+        if show_save_template:
+            submit_actions.add_widget(
+                make_button(
+                    "收藏为常用模板",
+                    self.save_template,
+                    height=50,
+                    tone="secondary",
+                    font_size=12,
+                )
+            )
+        actions.add_widget(submit_actions)
         actions.add_widget(
-            make_button("收藏为常用模板", self.save_template, height=50, tone="secondary", font_size=12)
+            make_button("取消", lambda *_: self.dismiss(), height=46, tone="neutral")
         )
         body.add_widget(actions)
         super().__init__(
-            title="添加新动作",
+            title="复用最近动作" if self.initial_exercise is not None else "添加新动作",
             content=body,
             size_hint=(0.98, 0.9),
             pos_hint={"x": 0.01, "y": 0.02},
@@ -133,7 +196,7 @@ class ExerciseEntryPopup(Popup):
             self.error_label.text = "请检查重量、组数、次数和休息时间。"
             return None
         self.error_label.text = ""
-        return {
+        values: dict[str, Any] = {
             "name": name,
             "sets": sets,
             "reps": reps,
@@ -144,10 +207,52 @@ class ExerciseEntryPopup(Popup):
                 name,
             ),
         }
+        if self.initial_exercise is not None:
+            previous_sets = self.initial_exercise.get("set_log", [])
+            weight_changed = weight != self.initial_exercise["weight"]
+            reps_changed = reps != self.initial_exercise["reps"]
+            values["set_log"] = [
+                {
+                    "weight": (
+                        previous_sets[index]["weight"]
+                        if index < len(previous_sets) and not weight_changed
+                        else weight
+                    ),
+                    "reps": (
+                        previous_sets[index]["reps"]
+                        if index < len(previous_sets) and not reps_changed
+                        else reps
+                    ),
+                    "completed": False,
+                }
+                for index in range(sets)
+            ]
+        return values
 
     def confirm_add(self, *_: Any) -> None:
         exercise = self._values()
-        if exercise is not None and self.on_add(exercise, self.selected_part):
+        if exercise is None:
+            return
+        duplicates = (
+            self.find_duplicates(exercise, self.selected_part)
+            if self.find_duplicates is not None
+            else []
+        )
+        if duplicates:
+            ConfirmActionPopup(
+                "动作可能重复",
+                "本次训练已包含以下动作："
+                + "、".join(duplicates)
+                + "。仍要再添加吗？",
+                "仍要添加",
+                lambda: self._submit_add(exercise),
+                confirm_tone="primary",
+            ).open()
+            return
+        self._submit_add(exercise)
+
+    def _submit_add(self, exercise: dict[str, Any]) -> None:
+        if self.on_add(exercise, self.selected_part):
             self.dismiss()
 
     def save_template(self, *_: Any) -> None:
@@ -294,6 +399,177 @@ class AlternativePickerPopup(Popup):
     def _select(self, alternative: str, on_select: Callable[[str], None]) -> None:
         self.dismiss()
         on_select(alternative)
+
+
+class WorkoutTemplatePickerPopup(Popup):
+    def __init__(
+        self,
+        templates: list[dict[str, Any]],
+        on_select: Callable[[dict[str, Any]], None],
+    ):
+        content = BoxLayout(orientation="vertical", padding=dp(12), spacing=dp(8))
+        scroll = ScrollView(do_scroll_x=False)
+        choices = GridLayout(cols=1, spacing=dp(8), size_hint_y=None)
+        choices.bind(minimum_height=choices.setter("height"))
+        for template in templates:
+            choices.add_widget(
+                make_button(
+                    f"{template['title']} · {len(template['exercises'])} 个动作",
+                    lambda _, item=template: self._select(item, on_select),
+                    height=52,
+                    tone="secondary",
+                    font_size=13,
+                )
+            )
+        scroll.add_widget(choices)
+        content.add_widget(scroll)
+        content.add_widget(
+            make_button("取消", lambda *_: self.dismiss(), height=46, tone="neutral")
+        )
+        super().__init__(
+            title="从训练模板开始",
+            content=content,
+            size_hint=(0.94, 0.8),
+            auto_dismiss=False,
+        )
+        _style_popup(self)
+
+    def _select(
+        self,
+        template: dict[str, Any],
+        on_select: Callable[[dict[str, Any]], None],
+    ) -> None:
+        self.dismiss()
+        on_select(template)
+
+
+class WorkoutTemplatePreviewPopup(Popup):
+    def __init__(
+        self,
+        template: dict[str, Any],
+        duplicate_names: list[str],
+        on_confirm: Callable[[], None],
+    ):
+        self.on_confirm = on_confirm
+        content = BoxLayout(orientation="vertical", padding=dp(12), spacing=dp(8))
+        parts = "、".join(PART_NAMES.get(part, part) for part in template["body_parts"])
+        content.add_widget(
+            make_label(
+                f"{parts} · 共 {len(template['exercises'])} 个动作",
+                13,
+                MUTED,
+                28,
+            )
+        )
+        scroll = ScrollView(do_scroll_x=False)
+        exercise_list = BoxLayout(
+            orientation="vertical",
+            size_hint_y=None,
+            spacing=dp(6),
+        )
+        exercise_list.bind(minimum_height=exercise_list.setter("height"))
+        for index, exercise in enumerate(template["exercises"], start=1):
+            details = BoxLayout(
+                orientation="vertical",
+                size_hint_y=None,
+                height=dp(54),
+                spacing=dp(2),
+            )
+            details.add_widget(
+                make_label(f"{index}. {exercise['name']}", 14, TEXT, 28, True, shorten=True)
+            )
+            details.add_widget(
+                make_label(
+                    f"{exercise['sets']} 组 × {exercise['reps']} 次 · "
+                    f"{exercise['weight']:g} kg · 休息 {exercise.get('rest_seconds', 60)} 秒",
+                    11,
+                    MUTED,
+                    24,
+                )
+            )
+            exercise_list.add_widget(details)
+        scroll.add_widget(exercise_list)
+        content.add_widget(scroll)
+        if duplicate_names:
+            content.add_widget(
+                make_label(
+                    "今日训练已包含以下动作，继续添加会重复："
+                    + "、".join(duplicate_names),
+                    12,
+                    DANGER,
+                    48,
+                )
+            )
+        actions = GridLayout(cols=2, spacing=dp(8), size_hint_y=None, height=dp(48))
+        actions.add_widget(
+            make_button("返回", lambda *_: self.dismiss(), height=48, tone="neutral")
+        )
+        actions.add_widget(
+            make_button(
+                "仍要添加" if duplicate_names else "加入训练",
+                self.confirm,
+                height=48,
+            )
+        )
+        content.add_widget(actions)
+        super().__init__(
+            title=template["title"],
+            content=content,
+            size_hint=(0.94, 0.86),
+            auto_dismiss=False,
+        )
+        _style_popup(self)
+
+    def confirm(self, *_: Any) -> None:
+        self.dismiss()
+        self.on_confirm()
+
+
+class RecentExercisePickerPopup(Popup):
+    def __init__(
+        self,
+        recent_exercises: list[dict[str, Any]],
+        on_select: Callable[[dict[str, Any]], None],
+    ):
+        content = BoxLayout(orientation="vertical", padding=dp(12), spacing=dp(8))
+        scroll = ScrollView(do_scroll_x=False)
+        choices = GridLayout(cols=1, spacing=dp(8), size_hint_y=None)
+        choices.bind(minimum_height=choices.setter("height"))
+        for item in recent_exercises:
+            exercise = item["exercise"]
+            detail = (
+                f"{item['date']} · {PART_NAMES.get(item['body_part'], item['body_part'])} "
+                f"· {exercise['sets']} 组 · {exercise['weight']:g} kg"
+            )
+            choices.add_widget(
+                make_button(
+                    f"{exercise['name']}\n{detail}",
+                    lambda _, selected=item: self._select(selected, on_select),
+                    height=62,
+                    tone="secondary",
+                    font_size=11,
+                )
+            )
+        scroll.add_widget(choices)
+        content.add_widget(scroll)
+        content.add_widget(
+            make_button("取消", lambda *_: self.dismiss(), height=46, tone="neutral")
+        )
+        super().__init__(
+            title="复用最近动作",
+            content=content,
+            size_hint=(0.94, 0.8),
+            auto_dismiss=False,
+        )
+        _style_popup(self)
+
+    def _select(
+        self,
+        item: dict[str, Any],
+        on_select: Callable[[dict[str, Any]], None],
+    ) -> None:
+        self.dismiss()
+        on_select(item)
 
 
 class AlternativeEditorPopup(Popup):
@@ -592,12 +868,12 @@ class ExerciseEditorPopup(Popup):
             title = "确认删除整次训练"
             message = (
                 "这是本次训练的最后一个动作。删除后，整次训练记录、训练名称、"
-                "备注和时长也会一并删除。"
+                "备注和时长也会一并删除；删除后可在短时间内撤销。"
             )
             confirm_label = "删除整次训练"
         else:
             title = "确认移除动作"
-            message = "移除后，此动作及其训练组记录将从本次训练中删除。"
+            message = "移除后，此动作及其训练组记录将从本次训练中删除；删除后可在短时间内撤销。"
             confirm_label = "确认移除"
         ConfirmActionPopup(
             title,
@@ -611,5 +887,200 @@ class ExerciseEditorPopup(Popup):
             return
         self.dismiss()
         self.on_delete()
+
+
+class WorkoutTemplateEditorPopup(Popup):
+    def __init__(
+        self,
+        template: dict[str, Any] | None,
+        on_save: Callable[[str, list[str], list[dict[str, Any]]], bool],
+    ):
+        self.template = dict(template) if template is not None else None
+        self.on_save = on_save
+        self.exercises = [
+            dict(exercise) for exercise in (template or {}).get("exercises", [])
+        ]
+        self.selected_parts = set((template or {}).get("body_parts", ["胸"]))
+
+        content = BoxLayout(
+            orientation="vertical",
+            padding=dp(12),
+            spacing=dp(8),
+        )
+        self.title_input = make_input(
+            "模板名称，例如：推胸日 A",
+            (template or {}).get("title", ""),
+        )
+        content.add_widget(self.title_input)
+        content.add_widget(make_label("训练部位（可多选）", 13, MUTED, 24, True))
+        parts = GridLayout(
+            cols=3,
+            spacing=dp(6),
+            size_hint_y=None,
+            height=dp(144),
+            row_default_height=dp(44),
+            row_force_default=True,
+        )
+        self.part_buttons: dict[str, AppToggleButton] = {}
+        for part in PARTS:
+            button = AppToggleButton(PART_NAMES.get(part, part))
+            button.state = "down" if part in self.selected_parts else "normal"
+            button.bind(on_release=lambda _, selected=part: self.toggle_part(selected))
+            self.part_buttons[part] = button
+            parts.add_widget(button)
+        content.add_widget(parts)
+        content.add_widget(
+            make_button("＋ 添加动作", self.add_exercise, height=44, tone="secondary")
+        )
+        self.exercise_list = GridLayout(
+            cols=1,
+            spacing=dp(6),
+            size_hint_y=None,
+        )
+        self.exercise_list.bind(minimum_height=self.exercise_list.setter("height"))
+        exercise_scroll = ScrollView(do_scroll_x=False)
+        exercise_scroll.add_widget(self.exercise_list)
+        content.add_widget(exercise_scroll)
+        self.error_label = make_label("", 12, DANGER, 28)
+        content.add_widget(self.error_label)
+        actions = GridLayout(cols=2, spacing=dp(8), size_hint_y=None, height=dp(48))
+        actions.add_widget(make_button("保存模板", self.save, height=48))
+        actions.add_widget(
+            make_button("取消", lambda *_: self.dismiss(), height=48, tone="neutral")
+        )
+        content.add_widget(actions)
+        super().__init__(
+            title="编辑训练模板" if template is not None else "新增训练模板",
+            content=content,
+            size_hint=(0.96, 0.94),
+            auto_dismiss=False,
+        )
+        _style_popup(self)
+        self._render_exercises()
+
+    def toggle_part(self, part: str) -> None:
+        if part in self.selected_parts:
+            self.selected_parts.remove(part)
+        else:
+            self.selected_parts.add(part)
+        self.part_buttons[part].state = (
+            "down" if part in self.selected_parts else "normal"
+        )
+
+    def add_exercise(self, *_: Any) -> None:
+        initial_part = next(
+            (part for part in PARTS if part in self.selected_parts),
+            "胸",
+        )
+        ExerciseEntryPopup(
+            self._append_exercise,
+            self._append_exercise,
+            initial_part=initial_part,
+            show_save_template=False,
+        ).open()
+
+    def _append_exercise(
+        self,
+        exercise: dict[str, Any],
+        part: str,
+    ) -> bool:
+        self.exercises.append(dict(exercise))
+        if part in PARTS:
+            self.selected_parts.add(part)
+            self.part_buttons[part].state = "down"
+        self._render_exercises()
+        return True
+
+    def _edit_exercise(self, index: int) -> None:
+        ExerciseEditorPopup(
+            self.exercises[index],
+            lambda exercise: self._replace_exercise(index, exercise),
+        ).open()
+
+    def _replace_exercise(self, index: int, exercise: dict[str, Any]) -> None:
+        self.exercises[index] = dict(exercise)
+        self._render_exercises()
+
+    def _remove_exercise(self, index: int) -> None:
+        self.exercises.pop(index)
+        self._render_exercises()
+
+    def _render_exercises(self) -> None:
+        self.exercise_list.clear_widgets()
+        if not self.exercises:
+            self.exercise_list.add_widget(
+                make_label("还没有动作，请添加至少一个训练动作。", 13, MUTED, 44)
+            )
+            return
+        for index, exercise in enumerate(self.exercises):
+            row = BoxLayout(
+                orientation="horizontal",
+                size_hint_y=None,
+                height=dp(66),
+                spacing=dp(4),
+            )
+            details = BoxLayout(orientation="vertical", size_hint_x=.58)
+            details.add_widget(
+                make_label(
+                    exercise.get("name", "未命名动作"),
+                    13,
+                    TEXT,
+                    28,
+                    True,
+                    shorten=True,
+                )
+            )
+            details.add_widget(
+                make_label(
+                    f"{exercise.get('sets', 0)} 组 × {exercise.get('reps', 0)} 次"
+                    f" · {exercise.get('weight', 0):g} kg",
+                    10,
+                    MUTED,
+                    24,
+                    shorten=True,
+                )
+            )
+            row.add_widget(details)
+            row.add_widget(
+                make_button(
+                    "编辑",
+                    lambda _, position=index: self._edit_exercise(position),
+                    height=44,
+                    tone="secondary",
+                    font_size=11,
+                )
+            )
+            row.add_widget(
+                make_button(
+                    "移除",
+                    lambda _, position=index: self._remove_exercise(position),
+                    height=44,
+                    tone="danger",
+                    font_size=11,
+                )
+            )
+            self.exercise_list.add_widget(row)
+
+    def save(self, *_: Any) -> None:
+        title = self.title_input.text.strip()
+        body_parts = [part for part in PARTS if part in self.selected_parts]
+        if not title:
+            self.error_label.text = "请填写模板名称。"
+            return
+        if len(title) > 80:
+            self.error_label.text = "模板名称最多 80 个字符。"
+            return
+        if not body_parts:
+            self.error_label.text = "请至少选择一个训练部位。"
+            return
+        if not self.exercises:
+            self.error_label.text = "请至少添加一个训练动作。"
+            return
+        if self.on_save(
+            title,
+            body_parts,
+            [dict(exercise) for exercise in self.exercises],
+        ):
+            self.dismiss()
 
 

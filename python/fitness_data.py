@@ -246,6 +246,16 @@ class FitnessStore:
             duration_seconds = raw.get("duration_seconds")
             if duration_seconds is not None:
                 duration_seconds = _nonnegative_int(duration_seconds, "训练时长")
+            paused_at = raw.get("paused_at")
+            if paused_at is not None and (
+                finished
+                or duration_seconds is None
+                or isinstance(paused_at, bool)
+                or not isinstance(paused_at, (int, float))
+                or not math.isfinite(paused_at)
+                or paused_at < 0
+            ):
+                raise ValueError("训练暂停时间无效")
             for exercise in exercises:
                 exercise["set_log"] = _set_log(exercise, finished)
             normalized_workout = {
@@ -263,6 +273,8 @@ class FitnessStore:
                 normalized_workout["started_at"] = float(started_at)
             if duration_seconds is not None:
                 normalized_workout["duration_seconds"] = duration_seconds
+            if paused_at is not None:
+                normalized_workout["paused_at"] = float(paused_at)
             workouts.append(normalized_workout)
 
         body_weights: list[dict[str, Any]] = []
@@ -447,6 +459,40 @@ class FitnessStore:
         updated_data["plans"].append(plan)
         self._save(updated_data)
         return plan
+
+    def update_plan(
+        self,
+        plan_id: str,
+        title: str,
+        body_parts: list[str],
+        exercises: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        clean_title = str(title).strip()
+        clean_parts = list(dict.fromkeys(
+            str(part).strip() for part in body_parts if str(part).strip()
+        ))
+        if not clean_title:
+            raise ValueError("模板名称不能为空")
+        if not clean_parts:
+            raise ValueError("请至少选择一个训练部位")
+        if not exercises:
+            raise ValueError("请至少添加一个训练动作")
+        normalized_exercises = [_exercise(item) for item in exercises]
+        updated_data = deepcopy(self.data)
+        plan = next(
+            (item for item in updated_data["plans"] if item["id"] == plan_id),
+            None,
+        )
+        if plan is None:
+            raise KeyError("模板不存在")
+        plan.update({
+            "title": clean_title,
+            "body_parts": clean_parts,
+            "exercises": normalized_exercises,
+        })
+        validated = self._validate_document(updated_data)
+        self._save(validated)
+        return next(item for item in self.data["plans"] if item["id"] == plan_id)
 
     def add_daily_exercise(
         self,
@@ -651,6 +697,27 @@ class FitnessStore:
         )
         self._save(updated_data)
 
+    def move_workout_exercise(
+        self,
+        workout_id: str,
+        old_index: int,
+        new_index: int,
+    ) -> None:
+        updated_data = deepcopy(self.data)
+        workout = next(
+            (item for item in updated_data["workouts"] if item["id"] == workout_id),
+            None,
+        )
+        if workout is None or not 0 <= old_index < len(workout["exercises"]):
+            raise KeyError("训练动作不存在")
+        if workout["finished"] or workout.get("paused_at") is not None:
+            raise ValueError("只能调整进行中训练的动作顺序")
+        if not 0 <= new_index < len(workout["exercises"]):
+            raise IndexError("训练动作位置无效")
+        exercise = workout["exercises"].pop(old_index)
+        workout["exercises"].insert(new_index, exercise)
+        self._save(updated_data)
+
     def add_workout_set(self, workout_id: str, exercise_index: int) -> None:
         updated_data = deepcopy(self.data)
         workout = next(
@@ -686,15 +753,92 @@ class FitnessStore:
             return None
         workout = active[-1]
         started_at = workout.get("started_at")
-        if isinstance(started_at, (int, float)) and not isinstance(started_at, bool):
+        if workout.get("paused_at") is not None:
+            workout["duration_seconds"] = int(workout.get("duration_seconds", 0))
+        elif isinstance(started_at, (int, float)) and not isinstance(started_at, bool):
             workout["duration_seconds"] = max(0, int(time.time() - started_at))
+        workout.pop("paused_at", None)
         for exercise in workout["exercises"]:
             exercise["set_log"] = _set_log(exercise, False)
         workout["finished"] = True
         self._save(updated_data)
         return workout
 
-    def remove_workout_exercise(self, workout_id: str, index: int) -> None:
+    def pause_workout(self, workout_id: str) -> dict[str, Any]:
+        updated_data = deepcopy(self.data)
+        workout = next(
+            (item for item in updated_data["workouts"] if item["id"] == workout_id),
+            None,
+        )
+        if workout is None or workout["finished"]:
+            raise KeyError("进行中的训练不存在")
+        if workout.get("paused_at") is not None:
+            raise ValueError("训练已经暂停")
+        now = time.time()
+        started_at = workout.get("started_at", now)
+        if not isinstance(started_at, (int, float)) or isinstance(started_at, bool):
+            started_at = now
+        workout["duration_seconds"] = max(0, int(now - started_at))
+        workout["paused_at"] = now
+        self._save(updated_data)
+        return workout
+
+    def resume_workout(self, workout_id: str) -> dict[str, Any]:
+        updated_data = deepcopy(self.data)
+        workout = next(
+            (item for item in updated_data["workouts"] if item["id"] == workout_id),
+            None,
+        )
+        if workout is None or workout["finished"]:
+            raise KeyError("进行中的训练不存在")
+        if workout.get("paused_at") is None:
+            raise ValueError("训练当前未暂停")
+        duration_seconds = int(workout.get("duration_seconds", 0))
+        workout["started_at"] = time.time() - duration_seconds
+        workout.pop("paused_at", None)
+        workout.pop("duration_seconds", None)
+        self._save(updated_data)
+        return workout
+
+    def reopen_workout(
+        self,
+        workout_id: str,
+        *,
+        paused: bool = False,
+    ) -> dict[str, Any]:
+        updated_data = deepcopy(self.data)
+        workout = next(
+            (item for item in updated_data["workouts"] if item["id"] == workout_id),
+            None,
+        )
+        if workout is None:
+            raise KeyError("训练记录不存在")
+        if not workout["finished"]:
+            raise ValueError("训练仍在进行中")
+        if any(
+            item["date"] == workout["date"]
+            and not item["finished"]
+            and item["id"] != workout_id
+            for item in updated_data["workouts"]
+        ):
+            raise ValueError("当天已有另一条进行中的训练，无法继续此训练")
+        workout["finished"] = False
+        if paused:
+            workout["duration_seconds"] = int(workout.get("duration_seconds", 0))
+            workout["paused_at"] = time.time()
+        else:
+            workout.pop("duration_seconds", None)
+        self._save(updated_data)
+        return workout
+
+    def restore_workout(self, workout: dict[str, Any]) -> None:
+        if not isinstance(workout, dict) or not workout.get("finished"):
+            raise ValueError("只能恢复已结束的训练记录")
+        updated_data = deepcopy(self.data)
+        updated_data["workouts"].append(deepcopy(workout))
+        self._save(self._validate_document(updated_data))
+
+    def remove_workout_exercise(self, workout_id: str, index: int) -> dict[str, Any]:
         updated_data = deepcopy(self.data)
         workout = next(
             (item for item in updated_data["workouts"] if item["id"] == workout_id),
@@ -702,6 +846,7 @@ class FitnessStore:
         )
         if workout is None or not 0 <= index < len(workout["exercises"]):
             raise KeyError("训练动作不存在")
+        original_workout = deepcopy(workout)
         if len(workout["exercises"]) == 1:
             updated_data["workouts"] = [
                 item for item in updated_data["workouts"] if item["id"] != workout_id
@@ -709,6 +854,31 @@ class FitnessStore:
         else:
             workout["exercises"].pop(index)
         self._save(updated_data)
+        return original_workout
+
+    def restore_removed_workout_exercise(
+        self,
+        original_workout: dict[str, Any],
+        exercise_index: int,
+    ) -> None:
+        updated_data = deepcopy(self.data)
+        workout = next(
+            (
+                item for item in updated_data["workouts"]
+                if item["id"] == original_workout.get("id")
+            ),
+            None,
+        )
+        if not 0 <= exercise_index < len(original_workout.get("exercises", [])):
+            raise KeyError("要恢复的训练动作不存在")
+        if workout is None:
+            updated_data["workouts"].append(deepcopy(original_workout))
+        else:
+            workout["exercises"].insert(
+                min(exercise_index, len(workout["exercises"])),
+                deepcopy(original_workout["exercises"][exercise_index]),
+            )
+        self._save(self._validate_document(updated_data))
 
     def set_rest_day(self, entry_date: str, is_rest_day: bool) -> None:
         clean_date = _valid_date(entry_date)
@@ -777,6 +947,11 @@ class FitnessStore:
             raise KeyError("记录不存在")
         updated_data[collection] = remaining
         self._save(updated_data)
+
+    def restore_plan(self, plan: dict[str, Any]) -> None:
+        updated_data = deepcopy(self.data)
+        updated_data["plans"].append(deepcopy(plan))
+        self._save(self._validate_document(updated_data))
 
     def monthly_summary(self, month: str | None = None) -> dict[str, Any]:
         month = month or _today()[:7]

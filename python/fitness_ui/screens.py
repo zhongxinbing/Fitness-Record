@@ -5,6 +5,7 @@ from __future__ import annotations
 import calendar
 import logging
 import time
+from copy import deepcopy
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -24,7 +25,11 @@ from fitness_ui.dialogs import (
     ConfirmActionPopup,
     ExerciseEntryPopup,
     ExerciseEditorPopup,
+    RecentExercisePickerPopup,
     SetEntryPopup,
+    WorkoutTemplatePickerPopup,
+    WorkoutTemplatePreviewPopup,
+    WorkoutTemplateEditorPopup,
     WorkoutDetailsPopup,
 )
 from fitness_ui.export import ExportError, ExportPermissionRequired, export_json, share_export
@@ -33,6 +38,7 @@ from fitness_ui.widgets import (
     AppToggleButton,
     FitnessScreen,
     SurfaceCard,
+    UndoBanner,
     make_button,
     make_input,
     make_label,
@@ -66,20 +72,29 @@ class ExerciseLogCard(SurfaceCard):
         *,
         is_record: bool,
         finished: bool,
+        workout_id: str | None = None,
+        exercise_index: int = 0,
         on_edit: Any,
-        on_rest: Any,
         on_toggle_set: Any,
         on_edit_set: Any,
         on_add_set: Any,
+        on_move_up: Any | None = None,
+        on_move_down: Any | None = None,
+        can_move_up: bool = True,
+        can_move_down: bool = True,
     ):
         rows = exercise.get("set_log", [])
         completed_rows = [entry for entry in rows if entry["completed"]]
         completed_volume = sum(entry["weight"] * entry["reps"] for entry in completed_rows)
         self.exercise_name = exercise["name"]
+        self.workout_id = workout_id
+        self.exercise_index = exercise_index
+        self.finished = finished
         self.rest_seconds = exercise.get("rest_seconds", 60)
+        self.completed_sets = [bool(entry["completed"]) for entry in rows]
         super().__init__(
             size_hint_y=None,
-            height=dp(156 + 48 * len(rows)),
+            height=dp(172 + 48 * len(rows)),
             spacing=dp(3),
             padding=(dp(10), dp(6)),
         )
@@ -92,6 +107,30 @@ class ExerciseLogCard(SurfaceCard):
         title_row.add_widget(make_label(exercise["name"], 15, TEXT, 44, True, shorten=True))
         if is_record:
             title_row.add_widget(make_label("PR", 11, PRIMARY, 26, True))
+        if on_move_up is not None:
+            move_up = make_button(
+                "上移",
+                lambda *_: on_move_up(),
+                height=36,
+                tone="neutral",
+                font_size=9,
+            )
+            move_up.size_hint_x = None
+            move_up.width = dp(42)
+            move_up.disabled = not can_move_up
+            title_row.add_widget(move_up)
+        if on_move_down is not None:
+            move_down = make_button(
+                "下移",
+                lambda *_: on_move_down(),
+                height=36,
+                tone="neutral",
+                font_size=9,
+            )
+            move_down.size_hint_x = None
+            move_down.width = dp(42)
+            move_down.disabled = not can_move_down
+            title_row.add_widget(move_down)
         options = make_button(
             "编辑",
             lambda *_: on_edit(),
@@ -125,6 +164,8 @@ class ExerciseLogCard(SurfaceCard):
             column_header.add_widget(heading)
         self.add_widget(column_header)
 
+        self.set_rows: list[BoxLayout] = []
+        self.set_buttons: list[Any] = []
         for index, entry in enumerate(rows):
             previous = previous_sets[min(index, len(previous_sets) - 1)] if previous_sets else None
             previous_text = f"{previous['weight']:g}×{previous['reps']}" if previous else "—"
@@ -173,7 +214,10 @@ class ExerciseLogCard(SurfaceCard):
             check.disabled = finished
             row.add_widget(check)
             self.add_widget(row)
+            self.set_rows.append(row)
+            self.set_buttons.append(check)
 
+        self.add_widget(make_label("添加新组将沿用上一组重量和次数", 9, MUTED, 16))
         controls = BoxLayout(
             orientation="horizontal",
             size_hint_y=None,
@@ -190,23 +234,32 @@ class ExerciseLogCard(SurfaceCard):
         add_set.size_hint_x = .5
         add_set.disabled = finished
         controls.add_widget(add_set)
-        self.rest_button = make_button(
-            f"休息 {self.rest_seconds} 秒",
-            lambda *_: on_rest(),
-            height=44,
-            font_size=12,
+        rest_info = make_label(
+            f"组间休息 {self.rest_seconds} 秒",
+            9,
+            MUTED,
+            44,
         )
-        self.rest_button.size_hint_x = .5
-        self.rest_button.disabled = finished
-        controls.add_widget(self.rest_button)
+        rest_info.size_hint_x = .5
+        controls.add_widget(rest_info)
         self.add_widget(controls)
 
-    def update_rest_timer(self, remaining: int | None) -> None:
-        if remaining is None:
-            self.rest_button.text = f"休息 {self.rest_seconds} 秒"
-            return
-        minutes, seconds = divmod(max(0, remaining), 60)
-        self.rest_button.text = f"剩余 {minutes:02d}:{seconds:02d}"
+    def update_rest_timer(
+        self,
+        remaining: int | None,
+        set_index: int | None = None,
+    ) -> None:
+        for index, button in enumerate(self.set_buttons):
+            if remaining is not None and index == set_index:
+                minutes, seconds = divmod(max(0, remaining), 60)
+                button.text = f"{minutes:02d}:{seconds:02d}\n点击结束"
+                button.set_tone("primary")
+                button.disabled = False
+            else:
+                completed = self.completed_sets[index]
+                button.text = "已完成" if completed else "开始计时"
+                button.set_tone("primary" if completed else "secondary")
+                button.disabled = self.finished
 
 
 class WorkoutScreen(FitnessScreen):
@@ -229,6 +282,16 @@ class WorkoutScreen(FitnessScreen):
         self.header_status = make_label("", 13, PRIMARY, 38, True, shorten=True)
         self.header.add_widget(self.header_title)
         self.header.add_widget(self.header_status)
+        self.pause_button = make_button(
+            "暂停",
+            self.toggle_workout_pause,
+            height=38,
+            tone="secondary",
+            font_size=10,
+        )
+        self.pause_button.size_hint_x = None
+        self.pause_button.width = dp(54)
+        self.header.add_widget(self.pause_button)
         self.finish_button = make_button(
             "完成",
             self.finish_workout,
@@ -273,18 +336,49 @@ class WorkoutScreen(FitnessScreen):
         self.session_card.add_widget(self.session_notes)
         self.root_layout.add_widget(self.session_card)
 
+        self.undo_banner = UndoBanner()
+        self.root_layout.add_widget(self.undo_banner)
         self.scroll, self.content = make_scroll_content()
         self.root_layout.add_widget(self.scroll)
+        self.quick_actions = BoxLayout(
+            orientation="horizontal",
+            size_hint_y=None,
+            height=dp(56),
+            spacing=dp(8),
+        )
+        self.template_button = make_button(
+            "从模板开始",
+            self.open_template_picker,
+            height=56,
+            tone="secondary",
+            font_size=14,
+        )
+        self.template_button.size_hint_x = 1
+        self.quick_actions.add_widget(self.template_button)
+        self.recent_action_button = make_button(
+            "复用最近",
+            self.open_recent_action_picker,
+            height=56,
+            tone="secondary",
+            font_size=12,
+        )
+        self.recent_action_button.size_hint_x = 1
+        self.quick_actions.add_widget(self.recent_action_button)
         self.add_action_button = make_button(
-            "+ 记录新动作",
+            "记录新动作",
             self.open_add_action,
             height=56,
-            font_size=17,
+            font_size=14,
         )
-        self.root_layout.add_widget(self.add_action_button)
+        self.add_action_button.size_hint_x = 1
+        self.quick_actions.add_widget(self.add_action_button)
+        self.root_layout.add_widget(self.quick_actions)
         self.add_widget(self.root_layout)
         self.display_workout_id: str | None = None
         self.exercise_cards: list[ExerciseLogCard] = []
+        self._exercise_cards_by_key: dict[tuple[str, int], ExerciseLogCard] = {}
+        self._rest_timer_target: tuple[str, int, int] | None = None
+        self._pending_scroll_target: tuple[str, int, int] | None = None
         Clock.schedule_interval(self._update_session_duration, 1)
 
     def on_pre_enter(self, *_: Any) -> None:
@@ -297,6 +391,8 @@ class WorkoutScreen(FitnessScreen):
         )
 
     def refresh_today(self) -> None:
+        pending_scroll_target = self._pending_scroll_target
+        self._pending_scroll_target = None
         self.today = date.today().isoformat()
         workouts = self._today_workouts()
         active = self.store.active_workout(self.today)
@@ -324,17 +420,36 @@ class WorkoutScreen(FitnessScreen):
             for workout in display_workouts
             for exercise in workout["exercises"]
         )
-        self.header_title.text = "训练中" if active is not None else "今日训练"
+        self.header_title.text = (
+            "已暂停"
+            if active is not None and active.get("paused_at") is not None
+            else ("训练中" if active is not None else "今日训练")
+        )
         self.header_status.text = f"{part_text} · {completed_count}/{set_count} 组"
         self.finish_button.disabled = active is None
+        self.pause_button.disabled = active is None
+        self.pause_button.text = (
+            "继续"
+            if active is not None and active.get("paused_at") is not None
+            else "暂停"
+        )
         self.content.clear_widgets()
         self.exercise_cards = []
+        self._exercise_cards_by_key = {}
         self.content.add_widget(
             section_heading(
                 date.today().strftime("%Y年%m月%d日"),
-                "记录每组重量、次数，完成后点勾保存"
-                if active is not None
-                else (f"已完成 {action_count} 个动作" if action_count else "还没有开始今天的训练"),
+                (
+                    "训练时长已暂停，点击“继续”后恢复录入"
+                    if active is not None and active.get("paused_at") is not None
+                    else "记录每组重量、次数，完成后点勾保存"
+                    if active is not None
+                    else (
+                        f"已完成 {action_count} 个动作"
+                        if action_count
+                        else "还没有开始今天的训练"
+                    )
+                ),
             )
         )
 
@@ -354,11 +469,12 @@ class WorkoutScreen(FitnessScreen):
                     exercise,
                     self._previous_sets(exercise["name"], workout["id"]),
                     is_record=is_record,
-                    finished=bool(workout["finished"]),
+                    finished=bool(workout["finished"] or workout.get("paused_at")),
+                    workout_id=workout["id"],
+                    exercise_index=index,
                     on_edit=lambda selected=workout, position=index: self.edit_exercise(
                         selected["id"], position
                     ),
-                    on_rest=lambda selected=exercise: self.start_rest_timer(selected),
                     on_toggle_set=lambda position, value, selected=workout, action_index=index: self.toggle_set(
                         selected["id"],
                         action_index,
@@ -375,24 +491,42 @@ class WorkoutScreen(FitnessScreen):
                     on_add_set=lambda selected=workout, position=index: self.add_set(
                         selected["id"], position
                     ),
+                    on_move_up=(
+                        lambda selected=workout, position=index: self.move_exercise(
+                            selected["id"], position, position - 1
+                        )
+                    )
+                    if not workout["finished"] and not workout.get("paused_at")
+                    else None,
+                    on_move_down=(
+                        lambda selected=workout, position=index: self.move_exercise(
+                            selected["id"], position, position + 1
+                        )
+                    )
+                    if not workout["finished"] and not workout.get("paused_at")
+                    else None,
+                    can_move_up=index > 0,
+                    can_move_down=index < len(workout["exercises"]) - 1,
                 )
                 self.content.add_widget(card)
                 self.exercise_cards.append(card)
+                self._exercise_cards_by_key[(workout["id"], index)] = card
 
         rest_day = any(item["date"] == self.today for item in self.store.data["rest_days"])
-        if not rest_day:
+        has_workout = any(item["date"] == self.today for item in workouts)
+        if rest_day:
             self.content.add_widget(
                 make_button(
-                    "今天太累，休息一天",
+                    "已标记休息日 · 点击取消",
                     self.toggle_rest_day,
                     height=44,
                     tone="neutral",
                 )
             )
-        else:
+        elif not has_workout:
             self.content.add_widget(
                 make_button(
-                    "已标记休息日 · 点击取消",
+                    "今天太累，休息一天",
                     self.toggle_rest_day,
                     height=44,
                     tone="neutral",
@@ -406,21 +540,78 @@ class WorkoutScreen(FitnessScreen):
         if snapshot is not None:
             state, remaining = snapshot()
             self.update_rest_timer(state, remaining)
+        if pending_scroll_target is not None:
+            Clock.schedule_once(
+                lambda _dt, target=pending_scroll_target: self._scroll_to_set(target),
+                0,
+            )
 
     def update_rest_timer(
         self,
         state: dict[str, Any] | None,
         remaining: int,
     ) -> None:
-        exercise_name = (
-            state.get("exercise")
-            if state is not None and state.get("status") == "running"
-            else None
+        if state is None or state.get("status") != "running":
+            self._rest_timer_target = None
+            for card in self.exercise_cards:
+                card.update_rest_timer(None)
+            return
+        if self._rest_timer_target is None:
+            exercise_name = state.get("exercise")
+            for (workout_id, exercise_index), card in self._exercise_cards_by_key.items():
+                if card.exercise_name != exercise_name:
+                    continue
+                completed_sets = [
+                    index for index, completed in enumerate(card.completed_sets) if completed
+                ]
+                set_index = completed_sets[-1] if completed_sets else 0
+                self._rest_timer_target = (workout_id, exercise_index, set_index)
+                break
+        for key, card in self._exercise_cards_by_key.items():
+            if (
+                self._rest_timer_target is not None
+                and key == self._rest_timer_target[:2]
+            ):
+                card.update_rest_timer(remaining, self._rest_timer_target[2])
+            else:
+                card.update_rest_timer(None)
+
+    def _scroll_to_set(self, target: tuple[str, int, int]) -> None:
+        workout_id, exercise_index, set_index = target
+        card = self._exercise_cards_by_key.get((workout_id, exercise_index))
+        if card is None or not 0 <= set_index < len(card.set_rows):
+            return
+        self.scroll.scroll_to(card.set_rows[set_index], padding=dp(12), animate=True)
+
+    def _next_uncompleted_set(
+        self,
+        workout_id: str,
+        exercise_index: int,
+        set_index: int,
+    ) -> tuple[str, int, int] | None:
+        workout = next(
+            (item for item in self.store.data["workouts"] if item["id"] == workout_id),
+            None,
         )
-        for card in self.exercise_cards:
-            card.update_rest_timer(
-                remaining if card.exercise_name == exercise_name else None
-            )
+        if workout is None:
+            return None
+        positions = [
+            (current_exercise, current_set)
+            for current_exercise, exercise in enumerate(workout["exercises"])
+            for current_set in range(len(exercise.get("set_log", [])))
+        ]
+        if not positions:
+            return None
+        try:
+            current_position = positions.index((exercise_index, set_index))
+        except ValueError:
+            return None
+        for offset in range(1, len(positions) + 1):
+            candidate = positions[(current_position + offset) % len(positions)]
+            current_exercise, current_set = candidate
+            if not workout["exercises"][current_exercise]["set_log"][current_set]["completed"]:
+                return workout_id, current_exercise, current_set
+        return None
 
     @staticmethod
     def _format_duration(seconds: int) -> str:
@@ -442,7 +633,11 @@ class WorkoutScreen(FitnessScreen):
             self.session_duration.text = "训练时长 —"
             return
         started_at = workout.get("started_at")
-        if not workout["finished"] and isinstance(started_at, (int, float)):
+        if (
+            not workout["finished"]
+            and workout.get("paused_at") is None
+            and isinstance(started_at, (int, float))
+        ):
             seconds = int(max(0, time.time() - started_at))
         else:
             seconds = workout.get("duration_seconds")
@@ -509,7 +704,78 @@ class WorkoutScreen(FitnessScreen):
         ExerciseEntryPopup(
             on_add=self._add_action,
             on_save_template=self._save_action_template,
+            find_duplicates=self._find_duplicate_action_names,
         ).open()
+
+    def _find_duplicate_action_names(
+        self,
+        exercise: dict[str, Any],
+        _body_part: str,
+    ) -> list[str]:
+        workout = self.store.active_workout(self.today)
+        if workout is None:
+            return []
+        wanted = exercise["name"].casefold()
+        return list(dict.fromkeys(
+            item["name"]
+            for item in workout["exercises"]
+            if item["name"].casefold() == wanted
+        ))
+
+    def open_recent_action_picker(self, *_: Any) -> None:
+        active = self.store.active_workout(self.today)
+        excluded_workout_id = active["id"] if active is not None else None
+        recent_exercises = []
+        seen_names: set[str] = set()
+        for workout in self.store.recent_workouts():
+            if workout["id"] == excluded_workout_id:
+                continue
+            for exercise in reversed(workout["exercises"]):
+                key = exercise["name"].casefold()
+                if key in seen_names:
+                    continue
+                seen_names.add(key)
+                recent_exercises.append({
+                    "exercise": deepcopy(exercise),
+                    "body_part": workout["body_parts"][0],
+                    "date": workout["date"],
+                })
+                if len(recent_exercises) == 12:
+                    break
+            if len(recent_exercises) == 12:
+                break
+        if not recent_exercises:
+            self.notify("还没有可复用的历史动作，请先记录一次训练。")
+            return
+        RecentExercisePickerPopup(recent_exercises, self._open_recent_action).open()
+
+    def _open_recent_action(self, item: dict[str, Any]) -> None:
+        exercise = item["exercise"]
+        exercise["set_log"] = [
+            {**entry, "completed": False}
+            for entry in exercise.get("set_log", [])
+        ]
+        ExerciseEntryPopup(
+            on_add=self._add_action,
+            on_save_template=self._save_action_template,
+            initial_exercise=exercise,
+            initial_part=item["body_part"],
+            find_duplicates=self._find_duplicate_action_names,
+        ).open()
+
+    def open_template_picker(self, *_: Any) -> None:
+        templates = list(self.store.data["plans"])
+        if not templates:
+            self.notify("资料库中还没有训练模板，请先在资料库创建模板。")
+            return
+        WorkoutTemplatePickerPopup(templates, self._add_template_to_today).open()
+
+    def _add_template_to_today(self, template: dict[str, Any]) -> None:
+        library_screen = getattr(self.app_ref, "library_screen", None)
+        if library_screen is None:
+            self.notify("模板入口暂不可用，请从资料库添加模板。")
+            return
+        library_screen.add_template_to_today(template)
 
     def _add_action(self, exercise: dict[str, Any], body_part: str) -> bool:
         try:
@@ -579,30 +845,67 @@ class WorkoutScreen(FitnessScreen):
 
     def remove_exercise(self, workout_id: str, index: int) -> None:
         try:
-            self.store.remove_workout_exercise(workout_id, index)
+            original_workout = self.store.remove_workout_exercise(workout_id, index)
         except (KeyError, FitnessStoreError) as error:
             LOGGER.exception("Unable to remove today's exercise")
             self.notify(f"删除动作失败：{error}")
             return
+        target = self._rest_timer_target
+        if target is not None and target[0] == workout_id:
+            if target[1] == index:
+                controller = getattr(self.app_ref, "timer_controller", None)
+                if controller is not None and controller.state is not None:
+                    try:
+                        controller.cancel()
+                    except ValueError as error:
+                        LOGGER.exception("Unable to cancel timer for removed exercise")
+                        self.notify(f"动作已删除，但取消休息计时失败：{error}")
+                        self._rest_timer_target = None
+            elif target[1] > index:
+                self._rest_timer_target = (workout_id, target[1] - 1, target[2])
+        self.undo_banner.show(
+            "动作已删除",
+            lambda: self._undo_remove_exercise(original_workout, index),
+        )
         self.refresh_today()
 
-    def start_rest_timer(self, exercise: dict[str, Any]) -> None:
+    def _undo_remove_exercise(
+        self,
+        original_workout: dict[str, Any],
+        exercise_index: int,
+    ) -> None:
+        try:
+            self.store.restore_removed_workout_exercise(original_workout, exercise_index)
+        except (KeyError, ValueError, FitnessStoreError) as error:
+            LOGGER.exception("Unable to undo today's exercise removal")
+            self.notify(f"撤销删除失败：{error}")
+            return
+        self.refresh_today()
+
+    def start_rest_timer(
+        self,
+        exercise: dict[str, Any],
+        target: tuple[str, int, int] | None = None,
+    ) -> None:
         controller = self.app_ref.timer_controller
         state = controller.state
         if state is not None and state.get("status") == "running":
-            if state.get("exercise") != exercise["name"]:
-                self.notify(f"{state.get('exercise', '当前动作')}的休息计时仍在运行。")
-            self.app_ref.open_rest_timer()
+            if target == self._rest_timer_target:
+                return
+            self.notify(
+                f"{state.get('exercise', '当前动作')}的休息计时仍在运行，"
+                "请先点击倒计时按钮结束。"
+            )
             return
         try:
+            self._rest_timer_target = target
             controller.start(
                 exercise["name"],
                 exercise.get("rest_seconds", 60),
             )
         except ValueError as error:
+            self._rest_timer_target = None
             self.notify(str(error))
-            return
-        self.app_ref.open_rest_timer()
 
     def finish_workout(self, *_: Any) -> None:
         workout = self.store.active_workout(self.today)
@@ -633,6 +936,8 @@ class WorkoutScreen(FitnessScreen):
         ).open()
 
     def _finish_workout_confirmed(self) -> None:
+        active = self.store.active_workout(self.today)
+        was_paused = active is not None and active.get("paused_at") is not None
         try:
             workout = self.store.finish_workout(self.today)
         except FitnessStoreError as error:
@@ -642,8 +947,66 @@ class WorkoutScreen(FitnessScreen):
         if workout is None:
             self.notify("当前没有进行中的训练。")
             return
+        self.undo_banner.show(
+            "训练已结束",
+            lambda: self._undo_finish_workout(workout["id"], was_paused),
+        )
         self.refresh_today()
-        self.notify("训练已完成并保存。")
+
+    def _undo_finish_workout(self, workout_id: str, was_paused: bool = False) -> None:
+        try:
+            self.store.reopen_workout(workout_id, paused=was_paused)
+        except (KeyError, ValueError, FitnessStoreError) as error:
+            LOGGER.exception("Unable to undo workout completion")
+            self.notify(f"恢复训练失败：{error}")
+            return
+        self.refresh_today()
+        self.notify("已恢复训练，可以继续记录。")
+
+    def toggle_workout_pause(self, *_: Any) -> None:
+        workout = self.store.active_workout(self.today)
+        if workout is None:
+            self.notify("当前没有进行中的训练。")
+            return
+        try:
+            if workout.get("paused_at") is not None:
+                self.store.resume_workout(workout["id"])
+            else:
+                self.store.pause_workout(workout["id"])
+        except (KeyError, ValueError, FitnessStoreError) as error:
+            LOGGER.exception("Unable to pause or resume workout")
+            self.notify(f"更新训练状态失败：{error}")
+            return
+        self.refresh_today()
+
+    def move_exercise(
+        self,
+        workout_id: str,
+        old_index: int,
+        new_index: int,
+    ) -> None:
+        scroll_y = self.scroll.scroll_y
+        try:
+            self.store.move_workout_exercise(workout_id, old_index, new_index)
+        except (KeyError, IndexError, ValueError, FitnessStoreError) as error:
+            LOGGER.exception("Unable to reorder workout exercises")
+            self.notify(f"调整动作顺序失败：{error}")
+            return
+        target = self._rest_timer_target
+        if target is not None and target[0] == workout_id:
+            target_index = target[1]
+            if target_index == old_index:
+                target_index = new_index
+            elif old_index < target_index <= new_index:
+                target_index -= 1
+            elif new_index <= target_index < old_index:
+                target_index += 1
+            self._rest_timer_target = (workout_id, target_index, target[2])
+        self.refresh_today()
+        Clock.schedule_once(
+            lambda _dt, value=scroll_y: setattr(self.scroll, "scroll_y", value),
+            0,
+        )
 
     def toggle_set(
         self,
@@ -653,6 +1016,21 @@ class WorkoutScreen(FitnessScreen):
         completed: bool,
         exercise: dict[str, Any],
     ) -> None:
+        target = (workout_id, exercise_index, set_index)
+        if not completed and target == self._rest_timer_target:
+            controller = getattr(self.app_ref, "timer_controller", None)
+            state = getattr(controller, "state", None)
+            if (
+                controller is not None
+                and state is not None
+                and state.get("status") == "running"
+            ):
+                try:
+                    controller.cancel()
+                except ValueError as error:
+                    LOGGER.exception("Unable to stop rest timer from its set button")
+                    self.notify(f"停止休息计时失败：{error}")
+                return
         try:
             self.store.update_workout_set(
                 workout_id,
@@ -664,23 +1042,14 @@ class WorkoutScreen(FitnessScreen):
             LOGGER.exception("Unable to update workout set")
             self.notify(f"更新训练组失败：{error}")
             return
+        self._pending_scroll_target = (
+            self._next_uncompleted_set(workout_id, exercise_index, set_index)
+            if completed
+            else None
+        )
         self.refresh_today()
         if completed and exercise.get("rest_seconds", 0) > 0:
-            self.start_rest_timer(exercise)
-        elif not completed:
-            controller = getattr(self.app_ref, "timer_controller", None)
-            state = getattr(controller, "state", None)
-            if (
-                controller is not None
-                and state is not None
-                and state.get("status") == "running"
-                and state.get("exercise") == exercise["name"]
-            ):
-                try:
-                    controller.cancel()
-                except ValueError as error:
-                    LOGGER.exception("Unable to cancel rest timer after undoing a set")
-                    self.notify(f"已撤销训练组，但取消计时失败：{error}")
+            self.start_rest_timer(exercise, target)
 
     def edit_set(
         self,
@@ -721,6 +1090,13 @@ class WorkoutScreen(FitnessScreen):
             LOGGER.exception("Unable to add workout set")
             self.notify(f"添加训练组失败：{error}")
             return
+        workout = next(
+            (item for item in self.store.data["workouts"] if item["id"] == workout_id),
+            None,
+        )
+        if workout is not None and 0 <= exercise_index < len(workout["exercises"]):
+            set_index = len(workout["exercises"][exercise_index]["set_log"]) - 1
+            self._pending_scroll_target = (workout_id, exercise_index, set_index)
         self.refresh_today()
 
 
@@ -737,6 +1113,8 @@ class CalendarHistoryScreen(FitnessScreen):
             padding=(dp(10), dp(8)),
         )
         self.scroll, self.content = make_scroll_content()
+        self.undo_banner = UndoBanner()
+        self.root_layout.add_widget(self.undo_banner)
         self.root_layout.add_widget(self.scroll)
         self.add_widget(self.root_layout)
 
@@ -943,7 +1321,7 @@ class CalendarHistoryScreen(FitnessScreen):
                 30
                 + 24
                 + sum(
-                    26 + 22 * max(1, len(set_log))
+                    26 + 22 * max(1, len(set_log)) + 10 * len(set_log)
                     for _, set_log in exercise_rows
                 )
                 + note_height
@@ -958,7 +1336,13 @@ class CalendarHistoryScreen(FitnessScreen):
                 padding=dp(12),
             )
             time_label = workout.get("training_time") or "时间未记录"
-            card.add_widget(
+            workout_header = BoxLayout(
+                orientation="horizontal",
+                size_hint_y=None,
+                height=dp(30),
+                spacing=dp(4),
+            )
+            workout_header.add_widget(
                 make_label(
                     f"{time_label} · {workout['title']}",
                     15,
@@ -968,9 +1352,33 @@ class CalendarHistoryScreen(FitnessScreen):
                     shorten=True,
                 )
             )
+            if workout["finished"]:
+                edit_workout_button = make_button(
+                    "编辑",
+                    lambda *_args, item=workout: self.edit_historical_workout(item),
+                    height=30,
+                    tone="neutral",
+                    font_size=9,
+                )
+                edit_workout_button.size_hint_x = None
+                edit_workout_button.width = dp(42)
+                workout_header.add_widget(edit_workout_button)
+                delete_workout_button = make_button(
+                    "删除",
+                    lambda *_args, record_id=workout["id"]: self.delete_historical_workout(
+                        record_id
+                    ),
+                    height=30,
+                    tone="danger",
+                    font_size=9,
+                )
+                delete_workout_button.size_hint_x = None
+                delete_workout_button.width = dp(42)
+                workout_header.add_widget(delete_workout_button)
+            card.add_widget(workout_header)
             parts = "、".join(PART_NAMES.get(part, part) for part in workout["body_parts"])
             card.add_widget(make_label(parts, 12, MUTED, 24))
-            for exercise, set_log in exercise_rows:
+            for exercise_index, (exercise, set_log) in enumerate(exercise_rows):
                 card.add_widget(
                     make_label(
                         f"{exercise['name']}  {exercise['sets']}组×{exercise['reps']}次"
@@ -982,18 +1390,41 @@ class CalendarHistoryScreen(FitnessScreen):
                     )
                 )
                 if set_log:
-                    for index, entry in enumerate(set_log, start=1):
+                    for index, entry in enumerate(set_log):
                         status = "已完成" if entry["completed"] else "未完成"
-                        card.add_widget(
+                        set_row = BoxLayout(
+                            orientation="horizontal",
+                            size_hint_y=None,
+                            height=dp(32),
+                            spacing=dp(4),
+                        )
+                        set_row.add_widget(
                             make_label(
-                                f"第 {index} 组 · {entry['weight']:g}kg × "
+                                f"第 {index + 1} 组 · {entry['weight']:g}kg × "
                                 f"{entry['reps']}次 · {status}",
                                 12,
                                 MUTED,
-                                22,
+                                32,
                                 shorten=True,
                             )
                         )
+                        if workout["finished"]:
+                            edit_set_button = make_button(
+                                "编辑",
+                                lambda *_args, selected_workout=workout, action_index=exercise_index, set_index=index, selected_entry=entry: self.edit_historical_set(
+                                    selected_workout["id"],
+                                    action_index,
+                                    set_index,
+                                    selected_entry,
+                                ),
+                                height=30,
+                                tone="neutral",
+                                font_size=9,
+                            )
+                            edit_set_button.size_hint_x = None
+                            edit_set_button.width = dp(44)
+                            set_row.add_widget(edit_set_button)
+                        card.add_widget(set_row)
                 else:
                     card.add_widget(
                         make_label("逐组数据未记录", 12, MUTED, 22)
@@ -1019,6 +1450,123 @@ class CalendarHistoryScreen(FitnessScreen):
             else:
                 card.add_widget(make_label("训练时长未记录", 12, MUTED, 24))
             self.content.add_widget(card)
+
+    def edit_historical_workout(self, workout: dict[str, Any]) -> None:
+        if not workout["finished"]:
+            self.notify("进行中的训练请在今日页面修改。")
+            return
+        WorkoutDetailsPopup(
+            workout["title"],
+            workout["notes"],
+            lambda title, notes: self._save_historical_workout_details(
+                workout["id"],
+                title,
+                notes,
+            ),
+        ).open()
+
+    def _save_historical_workout_details(
+        self,
+        workout_id: str,
+        title: str,
+        notes: str,
+    ) -> bool:
+        try:
+            self.store.update_workout_details(workout_id, title, notes)
+        except (KeyError, ValueError, FitnessStoreError) as error:
+            LOGGER.exception("Unable to update historical workout details")
+            self.notify(f"保存训练详情失败：{error}")
+            return False
+        self.render()
+        return True
+
+    def edit_historical_set(
+        self,
+        workout_id: str,
+        exercise_index: int,
+        set_index: int,
+        entry: dict[str, Any],
+    ) -> None:
+        SetEntryPopup(
+            float(entry["weight"]),
+            int(entry["reps"]),
+            lambda weight, reps: self._save_historical_set(
+                workout_id,
+                exercise_index,
+                set_index,
+                weight,
+                reps,
+            ),
+        ).open()
+
+    def _save_historical_set(
+        self,
+        workout_id: str,
+        exercise_index: int,
+        set_index: int,
+        weight: float,
+        reps: int,
+    ) -> None:
+        try:
+            self.store.update_workout_set(
+                workout_id,
+                exercise_index,
+                set_index,
+                weight=weight,
+                reps=reps,
+            )
+        except (KeyError, ValueError, FitnessStoreError) as error:
+            LOGGER.exception("Unable to update historical workout set")
+            self.notify(f"修改训练组失败：{error}")
+            return
+        self.render()
+
+    def delete_historical_workout(self, workout_id: str) -> None:
+        workout = next(
+            (
+                item for item in self.store.data["workouts"]
+                if item["id"] == workout_id
+            ),
+            None,
+        )
+        if workout is None or not workout["finished"]:
+            self.notify("找不到可删除的已完成训练记录。")
+            return
+        snapshot = deepcopy(workout)
+        ConfirmActionPopup(
+            "删除训练记录",
+            f"删除“{workout['title']}”及其全部动作和逐组数据？删除后可短时间内撤销。",
+            "删除记录",
+            lambda: self._delete_historical_workout_confirmed(snapshot),
+        ).open()
+
+    def _delete_historical_workout_confirmed(
+        self,
+        workout: dict[str, Any],
+    ) -> None:
+        try:
+            self.store.delete("workouts", workout["id"])
+        except (KeyError, FitnessStoreError) as error:
+            LOGGER.exception("Unable to delete historical workout")
+            self.notify(f"删除训练记录失败：{error}")
+            return
+        self.undo_banner.show(
+            "训练记录已删除",
+            lambda: self._undo_delete_historical_workout(workout),
+        )
+        self.render()
+
+    def _undo_delete_historical_workout(
+        self,
+        workout: dict[str, Any],
+    ) -> None:
+        try:
+            self.store.restore_workout(workout)
+        except (ValueError, FitnessStoreError) as error:
+            LOGGER.exception("Unable to undo historical workout deletion")
+            self.notify(f"恢复训练记录失败：{error}")
+            return
+        self.render()
 
     def open_backfill(self, *_: Any) -> None:
         training_date = self.selected_date
@@ -1130,6 +1678,16 @@ class LibraryScreen(FitnessScreen):
             spacing=dp(6),
         )
         self.title_row.add_widget(make_label("我的资料库", 20, TEXT, 42, True))
+        self.add_template_button = make_button(
+            "+",
+            self.create_template,
+            height=42,
+            tone="primary",
+            font_size=20,
+        )
+        self.add_template_button.size_hint_x = None
+        self.add_template_button.width = dp(44)
+        self.title_row.add_widget(self.add_template_button)
         self.save_today_button = make_button(
             "保存今日为模板",
             self.save_today_as_template,
@@ -1155,6 +1713,8 @@ class LibraryScreen(FitnessScreen):
         tab_row.add_widget(self.template_tab)
         tab_row.add_widget(self.records_tab)
         self.root_layout.add_widget(tab_row)
+        self.undo_banner = UndoBanner()
+        self.root_layout.add_widget(self.undo_banner)
         self.template_search = make_input("搜索模板、训练部位或动作")
         self.template_search.bind(text=self._template_search_changed)
         self.scroll, self.content = make_scroll_content()
@@ -1169,7 +1729,7 @@ class LibraryScreen(FitnessScreen):
         self.template_tab.state = "down"
         self.records_tab.state = "normal"
         self.content.clear_widgets()
-        self.content.add_widget(section_heading("动作模板", "选择模板，一键添加到今日训练。"))
+        self.content.add_widget(section_heading("动作模板", "先预览动作，再加入今日训练。"))
         self.content.add_widget(self.template_search)
         self.template_list = GridLayout(
             cols=1,
@@ -1205,14 +1765,14 @@ class LibraryScreen(FitnessScreen):
             message = (
                 "没有匹配的模板，请调整搜索内容。"
                 if query
-                else "暂无模板，可从添加动作时收藏。"
+                else "暂无模板，点击右上角“+”新建，也可在添加动作时收藏。"
             )
             self.template_list.add_widget(make_label(message, 14, MUTED, 48))
             return
         for template in templates:
             card = SurfaceCard(
                 size_hint_y=None,
-                height=dp(142),
+                height=dp(156),
                 spacing=dp(6),
                 padding=dp(12),
             )
@@ -1239,9 +1799,17 @@ class LibraryScreen(FitnessScreen):
             )
             actions.add_widget(
                 make_button(
-                    "加入今日训练",
+                    "预览并加入",
                     lambda _, item=template: self.add_template_to_today(item),
                     height=44,
+                )
+            )
+            actions.add_widget(
+                make_button(
+                    "编辑",
+                    lambda _, item=template: self.edit_template(item["id"]),
+                    height=44,
+                    tone="secondary",
                 )
             )
             actions.add_widget(
@@ -1254,6 +1822,66 @@ class LibraryScreen(FitnessScreen):
             )
             card.add_widget(actions)
             self.template_list.add_widget(card)
+
+    def create_template(self, *_: Any) -> None:
+        WorkoutTemplateEditorPopup(
+            None,
+            lambda title, parts, exercises: self._save_template(
+                None,
+                title,
+                parts,
+                exercises,
+            ),
+        ).open()
+
+    def edit_template(self, template_id: str) -> None:
+        template = next(
+            (item for item in self.store.data["plans"] if item["id"] == template_id),
+            None,
+        )
+        if template is None:
+            self.notify("模板不存在或已删除。")
+            self.show_templates()
+            return
+        WorkoutTemplateEditorPopup(
+            deepcopy(template),
+            lambda title, parts, exercises: self._save_template(
+                template_id,
+                title,
+                parts,
+                exercises,
+            ),
+        ).open()
+
+    def _save_template(
+        self,
+        template_id: str | None,
+        title: str,
+        body_parts: list[str],
+        exercises: list[dict[str, Any]],
+    ) -> bool:
+        try:
+            if template_id is None:
+                self.store.add_plan(title, body_parts, exercises)
+                message = "训练模板已新增。"
+            else:
+                self.store.update_plan(
+                    template_id,
+                    title,
+                    body_parts,
+                    exercises,
+                )
+                message = "训练模板已更新。"
+        except ValueError as error:
+            self.notify(str(error))
+            return False
+        except (KeyError, FitnessStoreError) as error:
+            LOGGER.exception("Unable to save workout template")
+            self.notify(f"保存模板失败：{error}")
+            return False
+        self.show_templates()
+        self.notify(message)
+        return True
 
     def show_records(self) -> None:
         self.template_tab.state = "normal"
@@ -1282,6 +1910,23 @@ class LibraryScreen(FitnessScreen):
             self.content.add_widget(card)
 
     def add_template_to_today(self, template: dict[str, Any]) -> None:
+        today = date.today().isoformat()
+        active = self.store.active_workout(today)
+        existing_names = {
+            exercise["name"] for exercise in active["exercises"]
+        } if active is not None else set()
+        duplicate_names = list(dict.fromkeys(
+            exercise["name"]
+            for exercise in template["exercises"]
+            if exercise["name"] in existing_names
+        ))
+        WorkoutTemplatePreviewPopup(
+            template,
+            duplicate_names,
+            lambda: self._confirm_template_add(template),
+        ).open()
+
+    def _confirm_template_add(self, template: dict[str, Any]) -> None:
         today = date.today().isoformat()
         has_finished_workout = any(
             item["date"] == today and item["finished"]
@@ -1326,17 +1971,30 @@ class LibraryScreen(FitnessScreen):
             return
         ConfirmActionPopup(
             "确认删除模板",
-            f"删除“{template['title']}”及其动作配置？此操作无法撤销。",
+            f"删除“{template['title']}”及其动作配置？删除后可短时间内撤销。",
             "删除模板",
-            lambda: self._delete_template_confirmed(template_id),
+            lambda: self._delete_template_confirmed(dict(template)),
         ).open()
 
-    def _delete_template_confirmed(self, template_id: str) -> None:
+    def _delete_template_confirmed(self, template: dict[str, Any]) -> None:
         try:
-            self.store.delete("plans", template_id)
+            self.store.delete("plans", template["id"])
         except (KeyError, FitnessStoreError) as error:
             LOGGER.exception("Unable to delete workout template")
             self.notify(f"删除模板失败：{error}")
+            return
+        self.show_templates()
+        self.undo_banner.show(
+            "模板已删除",
+            lambda: self._undo_delete_template(template),
+        )
+
+    def _undo_delete_template(self, template: dict[str, Any]) -> None:
+        try:
+            self.store.restore_plan(template)
+        except (ValueError, FitnessStoreError) as error:
+            LOGGER.exception("Unable to undo workout template deletion")
+            self.notify(f"撤销删除失败：{error}")
             return
         self.show_templates()
 
