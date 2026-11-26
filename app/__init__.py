@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import logging
+import sqlite3
 from pathlib import Path
 
 from fastapi import FastAPI, Request
@@ -13,7 +14,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from app.config import PROJECT_ROOT, settings
+from app.config import APP_VERSION, PROJECT_ROOT, settings
 from app.database import init_db
 from app.routers import auth, bodies, plans, stats
 
@@ -52,9 +53,30 @@ def create_app() -> FastAPI:
 
     init_db()
 
+    @app.exception_handler(sqlite3.Error)
+    def _sqlite_error(request: Request, exc: sqlite3.Error) -> JSONResponse:
+        """数据库层错误统一返回 503 + 可读提示，而不是抛出 500 traceback。"""
+        logger.exception("数据库操作失败: %s", exc)
+        current = getattr(request, "url", None)
+        return JSONResponse(
+            status_code=503,
+            content={
+                "detail": f"数据库不可用：{exc}",
+                "hint": "运行 python scripts/doctor.py 体检，必要时 python scripts/doctor.py --fix 修复；"
+                        f"当前库文件：{settings.resolved_db_path}",
+                "path": str(getattr(current, 'path', '')),
+            },
+        )
+
     @app.get("/health", tags=["system"])
     def health() -> dict:
-        return {"status": "ok", "app": settings.app_name}
+        # version / db 便于排查“跑的是不是新版、用的是哪个库文件”
+        return {
+            "status": "ok",
+            "app": settings.app_name,
+            "version": APP_VERSION,
+            "db": str(settings.resolved_db_path),
+        }
 
     @app.get("/", response_class=HTMLResponse)
     def index(request: Request) -> HTMLResponse:

@@ -48,6 +48,9 @@ class Settings(BaseSettings):
         return path
 
 
+# 版本号：升级后可用 /health 确认跑的是哪一版
+APP_VERSION = "7.1"
+
 # 项目根目录：fitness_tracker/
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 

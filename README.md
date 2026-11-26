@@ -70,6 +70,8 @@ fitness_tracker/
 ├── main.py                  启动入口
 ├── requirements.txt
 ├── README.md
+├── scripts/
+│   └── doctor.py            数据库体检/修复（缺表缺列、路径不对时用）
 └── app/
     ├── __init__.py          应用工厂（日志/静态资源/路由/异常处理）
     ├── config.py            配置 + 业务时区
@@ -190,6 +192,37 @@ python main.py
 - 到点用 Web Audio 播三次短音 + `navigator.vibrate` 震动，部分浏览器不支持音频时静默降级；
 - 面板里选中的预设时长会 `PATCH` 回该动作的 `rest_seconds`，下次打开直接沿用；
 - 每请求独立连接、`check_same_thread=False`，避免线程池跨线程报错。
+
+## 疑难排查
+
+先跑一次体检（只读，不改数据）：
+
+```bash
+python scripts/doctor.py
+```
+
+它会打印**库文件的绝对路径**、现有表、缺失的表与列、账号与计划数量。发现问题后：
+
+```bash
+python scripts/doctor.py --fix     # 先备份成 .bak-时间戳，再自动补齐缺失的表与列
+```
+
+常见报错对照：
+
+| 报错 | 原因 | 处理 |
+| --- | --- | --- |
+| `sqlite3.OperationalError: no such table: users` | 库文件里没有账号体系相关的表（库是旧版本建的，或启动时初始化没落到这个文件上） | `python scripts/doctor.py --fix` 自动补表；服务运行中还缺表时会**自动自愈**并在日志里打一条 `数据库缺少表 [...]，尝试自动补齐` |
+| `sqlite3.OperationalError: no such column: user_id` | 旧库缺少多用户列 | 同上，启动时会自动 `ALTER TABLE` 补列 |
+| `/api/auth/register` 返回 404 | 跑的是旧版代码（没有 auth 路由），或进程没重启 | 访问 `/health`，看 `version` 是否为 `7.1`；确认端口上跑的是当前目录的代码 |
+| 接口返回 503 +「数据库不可用」 | 数据库文件被杀毒软件/网盘占用，或所在目录不可写 | 把项目放到非同步目录，或用 `FIT_DB_PATH` 指定一个普通本地路径 |
+
+数据库默认在项目根目录下的 `data/fitness.db`（相对路径按项目根解析，与启动时的当前目录无关）。如果你之前在别的目录跑过，可能生成了两份库文件——以 `/health` 返回的 `db` 字段为准。
+
+`/health` 现在返回版本号和库路径，是最快的“我到底跑的是哪一版、用的哪个库”的自检方式：
+
+```json
+{"status": "ok", "app": "健身记录", "version": "7.1", "db": "/…/data/fitness.db"}
+```
 
 ## 后续可扩展方向
 

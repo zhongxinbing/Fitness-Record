@@ -96,6 +96,53 @@ CREATE INDEX IF NOT EXISTS idx_body_user ON body_records(user_id);
 """
 
 
+REQUIRED_TABLES = (
+    "users",
+    "auth_sessions",
+    "training_plans",
+    "plan_exercises",
+    "exercise_sets",
+    "body_records",
+)
+# 已成功初始化过的库（每个进程一份，避免每个请求都去查 sqlite_master）
+_READY_DBS: set[str] = set()
+
+
+def table_names(conn: sqlite3.Connection) -> set[str]:
+    """当前库里已有的表名。"""
+    return {
+        r["name"]
+        for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
+    }
+
+
+def missing_tables(conn: sqlite3.Connection) -> list[str]:
+    names = table_names(conn)
+    return [t for t in REQUIRED_TABLES if t not in names]
+
+
+def ensure_db_ready(conn: sqlite3.Connection) -> None:
+    """请求级自愈：万一启动时初始化没落到这个库文件上，这里补一次建表。
+
+    典型场景：旧库被 OneDrive/杀毒软件锁住、启动进程与请求进程看到的不是同一个
+    文件，或者直接用了旧版本的 database.py。补齐失败时抛出可读的错误，避免前端
+    只看到 “no such table: users”。
+    """
+    key = str(settings.resolved_db_path)
+    missing = missing_tables(conn)          # 每条请求一次轻量校验（sqlite_master 查询）
+    if not missing:
+        return
+
+    logger.warning("数据库缺少表 %s，尝试自动补齐：%s", missing, key)
+    init_db()
+    missing = missing_tables(conn)
+    if missing:
+        raise RuntimeError(
+            f"数据库仍未初始化（缺表 {missing}）：{key}；"
+            "请确认数据库文件可写，或运行 python scripts/doctor.py --fix"
+        )
+
+
 def get_connection() -> sqlite3.Connection:
     """获取数据库连接（行以 dict 访问）。
 
@@ -186,7 +233,9 @@ def init_db() -> None:
         conn.executescript(USER_INDEXES)
         _migrate_legacy(conn)
         conn.commit()
-        logger.info("数据库就绪: %s", settings.resolved_db_path)
+        _READY_DBS.add(str(settings.resolved_db_path))
+        logger.info("数据库就绪: %s（表：%s）", settings.resolved_db_path,
+                    ",".join(sorted(REQUIRED_TABLES)))
     except sqlite3.Error:
         logger.exception("数据库初始化失败，请检查 %s 是否可写", settings.resolved_db_path)
         raise
@@ -198,6 +247,7 @@ def get_db() -> Generator[sqlite3.Connection, None, None]:
     """FastAPI 依赖：请求级连接，结束后自动关闭。"""
     conn = get_connection()
     try:
+        ensure_db_ready(conn)
         yield conn
     finally:
         conn.close()
