@@ -1,0 +1,11 @@
+# 构建上下文里不需要的东西
+data/
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.zip
+.git/
+.gitignore
+.DS_Store
+deploy/deploy.sh

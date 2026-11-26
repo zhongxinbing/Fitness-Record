@@ -1,0 +1,36 @@
+# systemd 服务：裸机部署（不用 Docker）时使用
+# 复制到 /etc/systemd/system/fitness.service，然后：
+#   systemctl daemon-reload && systemctl enable --now fitness
+#   systemctl status fitness ; journalctl -u fitness -f
+
+[Unit]
+Description=Fitness Planner (FastAPI)
+After=network.target
+
+[Service]
+Type=simple
+User=fitness
+Group=fitness
+WorkingDirectory=/opt/fitness
+Environment="FIT_HOST=127.0.0.1"
+Environment="FIT_PORT=8000"
+Environment="FIT_DB_PATH=/opt/fitness/data/fitness.db"
+Environment="FIT_TIMEZONE=Asia/Shanghai"
+Environment="FIT_DEBUG=false"
+# HTTPS 上线后改为 true
+Environment="FIT_COOKIE_SECURE=false"
+ExecStart=/opt/fitness/.venv/bin/python -m uvicorn main:app --host 127.0.0.1 --port 8000 --workers 1 --proxy-headers --forwarded-allow-ips "*"
+Restart=always
+RestartSec=3
+# 日志走 journald，配 logrotate 或 journald 上限即可
+StandardOutput=journal
+StandardError=journal
+
+# 基础加固
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ReadWritePaths=/opt/fitness/data
+
+[Install]
+WantedBy=multi-user.target
