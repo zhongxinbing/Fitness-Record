@@ -220,6 +220,33 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
             logger.info("已为 %s 补充 user_id 列", table)
 
 
+def _run_schema(conn: sqlite3.Connection) -> None:
+    """逐句执行建表语句。
+
+    用 executescript 时只要中间任意一句失败（例如历史上遗留了同名的非表对象），
+    后面的建表语句就全都不执行，最终表现为“表都缺、但服务还起来了”。这里改成
+    一句一句执行，失败的语句单独记日志，最后再统一校验，缺表就明确报错。
+    """
+    buf = ""
+    failed = 0
+    for line in SCHEMA.splitlines(keepends=True):
+        buf += line
+        if not sqlite3.complete_statement(buf):
+            continue
+        stmt = buf.strip()
+        buf = ""
+        if not stmt:
+            continue
+        try:
+            conn.execute(stmt)
+        except sqlite3.Error as exc:
+            failed += 1
+            logger.error("建表语句执行失败（%s）：%s", exc, stmt.splitlines()[0][:70])
+    conn.commit()
+    if failed:
+        logger.warning("建表过程中有 %s 条语句失败，请运行 python scripts/doctor.py 查看详情", failed)
+
+
 def init_db() -> None:
     """初始化表结构，并在需要时执行一次性迁移。
 
@@ -228,14 +255,20 @@ def init_db() -> None:
     """
     conn = get_connection()
     try:
-        conn.executescript(SCHEMA)
+        _run_schema(conn)
         _ensure_columns(conn)
         conn.executescript(USER_INDEXES)
         _migrate_legacy(conn)
         conn.commit()
+        still_missing = missing_tables(conn)
+        if still_missing:
+            raise RuntimeError(
+                f"数据库初始化后仍缺表 {still_missing}：{settings.resolved_db_path}；"
+                "请运行 python scripts/doctor.py --fix 查看并修复"
+            )
         _READY_DBS.add(str(settings.resolved_db_path))
         logger.info("数据库就绪: %s（表：%s）", settings.resolved_db_path,
-                    ",".join(sorted(REQUIRED_TABLES)))
+                    ",".join(sorted(table_names(conn))))
     except sqlite3.Error:
         logger.exception("数据库初始化失败，请检查 %s 是否可写", settings.resolved_db_path)
         raise

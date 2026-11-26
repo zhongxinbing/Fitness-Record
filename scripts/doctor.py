@@ -99,6 +99,27 @@ def main() -> int:
     shutil.copy2(db_path, backup)
     print(f"\n已备份到：{backup}")
 
+    # 若同名对象是视图/索引/触发器（会挡住建表），先清掉这个“假表”
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        conflicts = [
+            (r["type"], r["name"])
+            for r in conn.execute(
+                "SELECT type, name FROM sqlite_master WHERE type != 'table' AND name IN ({})".format(
+                    ",".join("?" * len(REQUIRED_TABLES))
+                ),
+                REQUIRED_TABLES,
+            ).fetchall()
+        ]
+        for obj_type, name in conflicts:
+            drop = {"view": "DROP VIEW", "index": "DROP INDEX", "trigger": "DROP TRIGGER"}[obj_type]
+            conn.execute(f"{drop} IF EXISTS {name}")
+            print(f"  已清理同名冲突对象：{obj_type} {name}")
+        conn.commit()
+    finally:
+        conn.close()
+
     try:
         init_db()
     except sqlite3.Error as exc:

@@ -8,6 +8,7 @@ from datetime import date, datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -29,7 +30,8 @@ class Settings(BaseSettings):
     app_name: str = "健身记录"
     debug: bool = False
     host: str = "0.0.0.0"
-    port: int = 8000
+    # 云平台（Render/Heroku/Railway 等）统一注入 PORT，优先读它，其次 FIT_PORT
+    port: int = Field(default=8000, validation_alias=AliasChoices("PORT", "FIT_PORT"))
     db_path: str = "data/fitness.db"
     cors_origins: str = ""
     timezone: str = "Asia/Shanghai"
@@ -49,7 +51,7 @@ class Settings(BaseSettings):
 
 
 # 版本号：升级后可用 /health 确认跑的是哪一版
-APP_VERSION = "7.1"
+APP_VERSION = "7.2"
 
 # 项目根目录：fitness_tracker/
 PROJECT_ROOT = Path(__file__).resolve().parent.parent

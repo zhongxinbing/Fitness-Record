@@ -1,0 +1,41 @@
+# Render Blueprint：仓库里有这个文件后，New → Blueprint 就能一键建好服务
+# 注意：持久磁盘（disk）只有付费实例（starter 及以上）支持；免费实例请用文件末尾的注释版配置
+services:
+  - type: web
+    name: fitness-tracker
+    env: docker
+    plan: starter
+    region: singapore      # 离国内最近；也可改 oregon / frankfurt
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: FIT_DB_PATH        # 库文件落在持久盘上，重新部署不丢数据
+        value: /var/data/fitness.db
+      - key: FIT_COOKIE_SECURE  # Render 默认 HTTPS 访问，Cookie 必须带 Secure
+        value: "true"
+      - key: FIT_TIMEZONE
+        value: Asia/Shanghai
+      - key: FIT_DEBUG
+        value: "false"
+    disk:
+      name: fitness-data
+      mountPath: /var/data
+      sizeGB: 1
+
+# ── 免费实例版（没有持久盘，每次重新部署/实例重启数据都会清空，只适合试用）──
+# 把上面整段换成：
+#
+# services:
+#   - type: web
+#     name: fitness-tracker
+#     env: docker
+#     plan: free
+#     region: singapore
+#     dockerfilePath: ./Dockerfile
+#     healthCheckPath: /health
+#     envVars:
+#       - key: FIT_COOKIE_SECURE
+#         value: "true"
+#       - key: FIT_TIMEZONE
+#         value: Asia/Shanghai

@@ -110,7 +110,7 @@ python main.py
 
 - 云服务器一键：`sudo bash deploy/deploy.sh`（自动装 Python/Nginx/systemd，有域名则一并申请 HTTPS）
 - 容器：`docker compose up -d --build`
-- 免费 PaaS：仓库自带 `Dockerfile`，Render / Railway 可直接构建，**记得挂持久磁盘**
+- Render（无需服务器）：仓库自带 `Dockerfile` 和 `render.yaml`，Blueprint 一键建服务；**必须挂持久磁盘并把 `FIT_DB_PATH` 指到挂载点**，否则每次重新部署数据清空。端口自动读平台注入的 `PORT`
 
 ## API
 
@@ -167,7 +167,7 @@ python main.py
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
 | `FIT_HOST` | `0.0.0.0` | 监听地址 |
-| `FIT_PORT` | `8000` | 端口 |
+| `FIT_PORT` | `8000` | 端口；云平台（Render 等）注入的 `PORT` 优先级更高 |
 | `FIT_DB_PATH` | `data/fitness.db` | 数据库文件 |
 | `FIT_DEBUG` | `false` | 调试/热重载 |
 | `FIT_CORS_ORIGINS` | 空 | 允许跨域来源 |
@@ -195,9 +195,10 @@ python main.py
 
 ## 疑难排查
 
-先跑一次体检（只读，不改数据）：
+先跑一次体检（只读，不改数据），两种写法等价：
 
 ```bash
+python main.py --doctor        # 不用先起服务，直接体检
 python scripts/doctor.py
 ```
 
@@ -213,15 +214,24 @@ python scripts/doctor.py --fix     # 先备份成 .bak-时间戳，再自动补�
 | --- | --- | --- |
 | `sqlite3.OperationalError: no such table: users` | 库文件里没有账号体系相关的表（库是旧版本建的，或启动时初始化没落到这个文件上） | `python scripts/doctor.py --fix` 自动补表；服务运行中还缺表时会**自动自愈**并在日志里打一条 `数据库缺少表 [...]，尝试自动补齐` |
 | `sqlite3.OperationalError: no such column: user_id` | 旧库缺少多用户列 | 同上，启动时会自动 `ALTER TABLE` 补列 |
-| `/api/auth/register` 返回 404 | 跑的是旧版代码（没有 auth 路由），或进程没重启 | 访问 `/health`，看 `version` 是否为 `7.1`；确认端口上跑的是当前目录的代码 |
+| `/api/auth/register` 返回 404 | 跑的是旧版代码（没有 auth 路由），或进程没重启 | 访问 `/health`，看 `version` 是否为 `7.2`；确认端口上跑的是当前目录的代码 |
+| 启动直接抛 `RuntimeError: 数据库初始化后仍缺表 [...]` | 建表被同名的视图/索引挡住，或库文件不可写 | `python scripts/doctor.py --fix`（会先备份，并清理同名冲突对象）；日志里会有 `建表语句执行失败（…）` 的具体语句 |
 | 接口返回 503 +「数据库不可用」 | 数据库文件被杀毒软件/网盘占用，或所在目录不可写 | 把项目放到非同步目录，或用 `FIT_DB_PATH` 指定一个普通本地路径 |
 
 数据库默认在项目根目录下的 `data/fitness.db`（相对路径按项目根解析，与启动时的当前目录无关）。如果你之前在别的目录跑过，可能生成了两份库文件——以 `/health` 返回的 `db` 字段为准。
 
+启动成功后日志里会有一行自检横幅：
+
+```
+启动完成 v7.2 | 库文件：/…/data/fitness.db | 表数量：7
+```
+
+版本号对不上，就说明端口上跑的还是旧代码（或者你在另一个目录启动过）。
+
 `/health` 现在返回版本号和库路径，是最快的“我到底跑的是哪一版、用的哪个库”的自检方式：
 
 ```json
-{"status": "ok", "app": "健身记录", "version": "7.1", "db": "/…/data/fitness.db"}
+{"status": "ok", "app": "健身记录", "version": "7.2", "db": "/…/data/fitness.db"}
 ```
 
 ## 后续可扩展方向

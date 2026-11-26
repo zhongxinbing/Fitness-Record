@@ -15,7 +15,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from app.config import APP_VERSION, PROJECT_ROOT, settings
-from app.database import init_db
+from app.database import get_connection, init_db, table_names
 from app.routers import auth, bodies, plans, stats
 
 logger = logging.getLogger("fitness")
@@ -52,6 +52,18 @@ def create_app() -> FastAPI:
     app.include_router(stats.router)
 
     init_db()
+    # 启动横幅：版本、库文件、表数量一目了然，便于确认“跑的是哪一版、用的哪个库”
+    try:
+        conn = get_connection()
+        try:
+            logger.info(
+                "启动完成 v%s | 库文件：%s | 表数量：%s",
+                APP_VERSION, settings.resolved_db_path, len(table_names(conn)),
+            )
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        logger.exception("启动自检读取数据库失败：%s", settings.resolved_db_path)
 
     @app.exception_handler(sqlite3.Error)
     def _sqlite_error(request: Request, exc: sqlite3.Error) -> JSONResponse:
