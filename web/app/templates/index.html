@@ -88,6 +88,12 @@
         <section id="tab-history" class="tab-panel">
             <div class="overview" id="overview"></div>
             <div class="sec-head">
+                <span class="sec-title">周视图</span>
+                <span class="sec-meta" id="week-meta"></span>
+            </div>
+            <div id="week-panel"></div>
+
+            <div class="sec-head mt-20">
                 <span class="sec-title">训练历史</span>
                 <span class="sec-right">
                     <span class="sec-meta" id="history-count"></span>
@@ -241,6 +247,33 @@
                     </div>
                     <button type="submit" class="primary-btn mt-14">保存修改</button>
                     <p class="form-msg" id="pe-msg" aria-live="polite"></p>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <!-- ================= 替换动作 ================= -->
+    <div class="sheet-mask" id="swap-mask" hidden>
+        <div class="sheet" role="dialog" aria-modal="true" aria-label="替换动作">
+            <div class="sheet-grab"></div>
+            <div class="sheet-head">
+                <span>替换动作</span>
+                <button type="button" class="sheet-close" id="swap-close" aria-label="关闭">✕</button>
+            </div>
+            <div class="sheet-body">
+                <form id="swap-form" novalidate>
+                    <p class="hint" id="swap-from">当前动作：卧推</p>
+                    <div class="field mt-14">
+                        <label for="swap-name">新动作名称</label>
+                        <input type="text" id="swap-name" maxlength="50" placeholder="如 哑铃卧推">
+                    </div>
+                    <div class="field mt-14">
+                        <label>从历史动作里选（点一下即填入）</label>
+                        <div class="chips" id="swap-chips"></div>
+                    </div>
+                    <p class="hint mt-10">组数 / 次数 / 重量 / 休息时长保持不变，只换动作名</p>
+                    <button type="submit" class="primary-btn mt-14">确认替换</button>
+                    <p class="form-msg" id="swap-msg" aria-live="polite"></p>
                 </form>
             </div>
         </div>

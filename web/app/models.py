@@ -82,12 +82,23 @@ class SetLogIn(BaseModel):
     done: bool = Field(True, description="true=勾选完成，false=取消")
     reps: Optional[int] = Field(None, ge=0, le=999, description="实际次数，缺省沿用计划值")
     weight: Optional[float] = Field(None, ge=0, le=1000, description="实际重量，缺省沿用计划值")
+    rpe: Optional[float] = Field(None, ge=1, le=10, description="主观强度 RPE 1–10（0.5 步进）")
+
+    @field_validator("rpe")
+    @classmethod
+    def _half_step(cls, value: Optional[float]) -> Optional[float]:
+        if value is None:
+            return None
+        if abs(value * 2 - round(value * 2)) > 1e-9:
+            raise ValueError("RPE 需为 0.5 的整数倍")
+        return round(value, 1)
 
 
 class SetLogOut(BaseModel):
     set_index: int
     reps: Optional[int] = None
     weight: Optional[float] = None
+    rpe: Optional[float] = None
 
 
 class PlanExerciseOut(PlanExerciseIn):
@@ -97,6 +108,8 @@ class PlanExerciseOut(PlanExerciseIn):
     done_sets: list[SetLogOut] = Field(default_factory=list, description="已完成的组（实际次数/重量）")
     done_count: int = Field(0, description="已完成组数")
     actual_volume: float = Field(0, description="已完成组的实际容量")
+    skipped: bool = Field(False, description="训练中跳过该动作（不计入必做组数）")
+    avg_rpe: Optional[float] = Field(None, description="已完成组的平均 RPE")
 
 
 class PlanExercisePatch(BaseModel):
@@ -256,6 +269,24 @@ class ProgressPoint(BaseModel):
     volume: float
     sets: int
     est_1rm: float
+    avg_rpe: Optional[float] = None
+
+
+class WeeklyPoint(BaseModel):
+    """一周（周一至周日）的汇总。"""
+
+    week_start: date_type
+    sessions: int = Field(0, description="该周完成打卡的计划数")
+    volume: float = Field(0, description="该周总训练容量 kg")
+    sets: int = Field(0, description="该周记录的总组数")
+    body_weight: Optional[float] = Field(None, description="该周最后一条体重记录")
+
+
+class WeeklyOut(BaseModel):
+    weeks: list[WeeklyPoint]
+    avg_volume: float = 0
+    avg_sessions: float = 0
+    week_count: int = 0
 
 
 class ExerciseProgressOut(BaseModel):
@@ -267,3 +298,4 @@ class ExerciseProgressOut(BaseModel):
     pr_date: Optional[date_type] = None
     best_volume: float
     total_sets: int
+    avg_rpe: Optional[float] = None

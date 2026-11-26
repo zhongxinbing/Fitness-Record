@@ -15,17 +15,18 @@ from app.config import local_today
 from app.database import get_db
 from app.models import (
     BODY_PARTS,
+    ExerciseNameOut,
+    ExerciseProgressOut,
     HistoryDayOut,
     PlanExerciseIn,
     PlanExerciseOut,
     PlanExercisePatch,
-    ExerciseNameOut,
-    ExerciseProgressOut,
     PlanIn,
+    PlanOut,
     PlanPatch,
     SetLogIn,
     SetLogOut,
-    PlanOut,
+    WeeklyOut,
 )
 from app.repository import PlanRepository
 
@@ -116,10 +117,33 @@ def log_exercise_set(
     repo = _repo(conn, user)
     if not repo.exists(plan_id):
         raise HTTPException(status_code=404, detail="计划不存在")
-    result = repo.log_set(plan_id, exercise_id, set_index, payload.done, payload.reps, payload.weight)
+    result = repo.log_set(
+        plan_id, exercise_id, set_index, payload.done, payload.reps, payload.weight, payload.rpe
+    )
     if result is None:
         raise HTTPException(status_code=404, detail="动作不存在，或组序号超出该动作的计划组数")
     return result
+
+
+@router.post(
+    "/plans/{plan_id}/exercises/{exercise_id}/skip",
+    response_model=PlanOut,
+    summary="训练中跳过/恢复某个动作",
+)
+def skip_exercise(
+    plan_id: int,
+    exercise_id: int,
+    skip: bool = Query(True, description="true=跳过，false=恢复"),
+    conn: sqlite3.Connection = Depends(get_db),
+    user: dict = Depends(current_user),
+) -> dict:
+    repo = _repo(conn, user)
+    if not repo.exists(plan_id):
+        raise HTTPException(status_code=404, detail="计划不存在")
+    cleared = repo.set_skipped(plan_id, exercise_id, skip)
+    if cleared is None:
+        raise HTTPException(status_code=404, detail="动作不存在或不属于该计划")
+    return _require(repo.get(plan_id))
 
 
 @router.post(
@@ -287,3 +311,12 @@ def exercise_progress(
     if data is None:
         raise HTTPException(status_code=404, detail="还没有这个动作的历史记录")
     return data
+
+
+@router.get("/weekly", response_model=WeeklyOut, summary="周视图：每周训练容量与体重")
+def weekly(
+    weeks: int = Query(8, ge=1, le=52, description="回看几周，含本周"),
+    conn: sqlite3.Connection = Depends(get_db),
+    user: dict = Depends(current_user),
+) -> dict:
+    return _repo(conn, user).weekly(weeks)

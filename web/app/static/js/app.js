@@ -242,12 +242,15 @@ function planCard(plan, mode) {
         const logLine = logs.length
             ? `<div class="ex-log">已做 ${logs.length} 组：${logs.join(" / ")}</div>`
             : "";
+        const skipTag = e.skipped ? `<span class="skip-tag">已跳过</span>` : "";
+        const rpeLine = e.avg_rpe ? `<div class="ex-rpe">平均 RPE ${e.avg_rpe}</div>` : "";
         return `
         <div class="ex-item">
             <div class="ex-name-cell">
-                <div class="ex-label">${escapeHtml(e.name)}</div>
+                <div class="ex-label">${escapeHtml(e.name)}${skipTag}</div>
                 <div class="ex-detail">${e.sets} 组 × ${e.reps} 次 · ${e.weight > 0 ? e.weight + " kg" : "自重"}</div>
                 ${logLine}
+                ${rpeLine}
             </div>
             <button class="rest-chip" data-action="open-timer" data-pid="${plan.id}" data-eid="${e.id}"
                     data-rest="${e.rest_seconds}" data-name="${escapeHtml(e.name)}">⏱ ${fmtRest(e.rest_seconds)}</button>
@@ -405,6 +408,7 @@ $("#hist-pick-list").addEventListener("click", async (e) => {
 async function loadHistory() {
     const [days, stats] = await Promise.all([api("/api/history"), api("/api/stats")]);
     loadBodyPanel().catch(() => {});
+    loadWeekly().catch(() => {});
 
     const partChips = Object.entries(stats.body_part_dist || {})
         .map(([p, n]) => `<span class="part-chip">${escapeHtml(p)} ${n}</span>`)
@@ -435,7 +439,7 @@ function dayCard(day) {
             </div>
             ${p.exercises.map((e) => `
                 <div class="dc-ex">
-                    <span>${escapeHtml(e.name)}</span>
+                    <span>${escapeHtml(e.name)}${e.skipped ? '<span class="skip-tag">已跳过</span>' : ""}</span>
                     <span>${e.sets}×${e.reps}${e.weight > 0 ? ` · ${e.weight}kg` : ""}</span>
                 </div>`).join("")}
         </div>`).join("");
@@ -483,6 +487,10 @@ document.addEventListener("click", async (e) => {
             await openTraining(pid);
         } else if (action === "toggle-set") {
             await toggleTrainingSet(btn);
+        } else if (action === "swap-ex") {
+            await openSwapSheet(btn);
+        } else if (action === "skip-ex") {
+            await toggleSkipExercise(btn);
         } else if (action === "edit-plan") {
             await openPlanEditor(pid);
         } else if (action === "open-progress") {
@@ -788,7 +796,11 @@ function lineChart(points, opts = {}) {
     const W = 336, H = 176, L = 44, R = 30, T = 16, B = 36;
     const vals = points.map((p) => p.value);
     let min = Math.min(...vals), max = Math.max(...vals);
-    if (max === min) { max = min + (min === 0 ? 1 : Math.abs(min) * 0.2); min = min - (min === 0 ? 1 : Math.abs(min) * 0.2); }
+    if (max === min) {
+        const d = Math.max(0.5, Math.abs(min) * 0.01);
+        max += d;
+        min -= d;
+    }
     const padY = Math.max((max - min) * 0.18, 0.4);
     const lo = min - padY, hi = max + padY;
     const span = hi - lo || 1;
@@ -843,12 +855,14 @@ function lineChart(points, opts = {}) {
 const trainMask = $("#train-mask");
 let trainPlan = null;
 let trainTick = null;
+const rpeDrafts = {};                 // 未勾选组的 RPE 草稿
+const RPE_OPTIONS = [6, 6.5, 7, 7.5, 8, 8.5, 9, 9.5, 10];
 
 function trainDoneCount(plan) {
-    return plan.exercises.reduce((n, e) => n + (e.done_sets || []).length, 0);
+    return plan.exercises.reduce((n, e) => n + (e.skipped ? 0 : (e.done_sets || []).length), 0);
 }
 function trainSetCount(plan) {
-    return plan.exercises.reduce((n, e) => n + Number(e.sets), 0);
+    return plan.exercises.reduce((n, e) => n + (e.skipped ? 0 : Number(e.sets)), 0);
 }
 
 async function openTraining(pid) {
@@ -878,7 +892,7 @@ function renderTraining() {
         return;
     }
 
-    const firstUndone = plan.exercises.findIndex((e) => (e.done_sets || []).length < e.sets);
+    const firstUndone = plan.exercises.findIndex((e) => !e.skipped && (e.done_sets || []).length < e.sets);
 
     $("#train-body").innerHTML = plan.exercises.map((e, idx) => {
         const done = (e.done_sets || []).slice().sort((a, b) => a.set_index - b.set_index);
@@ -889,23 +903,36 @@ function renderTraining() {
             const logged = byIdx[n];
             const w = logged ? logged.weight : e.weight;
             const r = logged ? logged.reps : e.reps;
+            const rpe = logged && logged.rpe !== null ? logged.rpe : (rpeDrafts[`${e.id}-${n}`] || "");
             return `<div class="ts-row ${logged ? "done" : ""}">
           <span class="ts-idx">${n}</span>
           <input class="ts-in ts-w" type="number" inputmode="decimal" step="0.5" min="0" max="1000" value="${w}" data-set="${n}" aria-label="第 ${n} 组重量（kg）">
           <span class="ts-x">kg ×</span>
           <input class="ts-in ts-r" type="number" inputmode="numeric" step="1" min="1" max="999" value="${r}" data-set="${n}" aria-label="第 ${n} 组次数">
           <span class="ts-x">次</span>
+          <select class="ts-rpe ${rpe ? "on" : ""}" data-set="${n}" aria-label="第 ${n} 组 RPE">
+            <option value="">RPE</option>
+            ${RPE_OPTIONS.map((v) => `<option value="${v}" ${Number(rpe) === v ? "selected" : ""}>${v}</option>`).join("")}
+          </select>
           <button class="ts-check ${logged ? "on" : ""}" data-action="toggle-set" data-pid="${plan.id}" data-eid="${e.id}" data-set="${n}" aria-label="${logged ? "取消" : "完成"}第 ${n} 组">✓</button>
         </div>`;
         }).join("");
 
-        const cls = idx === firstUndone ? "is-active" : (done.length >= e.sets ? "is-done" : "");
+        const skipped = !!e.skipped;
+        const cls = skipped ? "is-skipped" : (idx === firstUndone ? "is-active" : (done.length >= e.sets ? "is-done" : ""));
+        const rpeAvg = done.filter((x) => x.rpe).length
+            ? ` · 平均 RPE ${(done.reduce((a, x) => a + (x.rpe || 0), 0) / done.filter((x) => x.rpe).length).toFixed(1)}`
+            : "";
         return `<div class="te-card ${cls}">
       <div class="te-head">
-        <span class="te-name">${escapeHtml(e.name)}</span>
-        <span class="te-count">${done.length}/${e.sets} 组</span>
+        <span class="te-name">${escapeHtml(e.name)}${skipped ? `<span class="skip-tag">已跳过</span>` : ""}</span>
+        <span class="te-count">${skipped ? "本次不做" : `${done.length}/${e.sets} 组`}</span>
       </div>
-      <div class="te-sub">计划 ${e.reps} 次 × ${e.weight > 0 ? e.weight + " kg" : "自重"} · 休息 ${fmtRest(e.rest_seconds)}</div>
+      <div class="te-sub">计划 ${e.reps} 次 × ${e.weight > 0 ? e.weight + " kg" : "自重"} · 休息 ${fmtRest(e.rest_seconds)}${rpeAvg}</div>
+      <div class="te-actions">
+        <button class="te-act" data-action="swap-ex" data-pid="${plan.id}" data-eid="${e.id}" data-name="${escapeHtml(e.name)}">↔ 替换</button>
+        <button class="te-act warn" data-action="skip-ex" data-pid="${plan.id}" data-eid="${e.id}" data-skip="${skipped ? "0" : "1"}">${skipped ? "恢复这个动作" : "跳过这个动作"}</button>
+      </div>
       ${rows}
     </div>`;
     }).join("");
@@ -932,9 +959,12 @@ async function toggleTrainingSet(btn) {
         const rIn = card.querySelector(`.ts-r[data-set="${n}"]`);
         const weight = wIn.value === "" ? 0 : Number(wIn.value);
         const reps = Number(rIn.value);
+        const rpeSel = card.querySelector(`.ts-rpe[data-set="${n}"]`);
+        const rpeVal = rpeSel && rpeSel.value !== "" ? Number(rpeSel.value) : null;
         if (!reps || reps < 1 || reps > 999) return toast("次数需在 1–999 之间");
         if (weight < 0 || weight > 1000) return toast("重量需在 0–1000 kg 之间");
         payload = { done: true, reps, weight };
+        if (rpeVal !== null) payload.rpe = rpeVal;
     }
 
     btn.disabled = true;
@@ -945,8 +975,9 @@ async function toggleTrainingSet(btn) {
         });
         ex.done_sets = ex.done_sets.filter((x) => x.set_index !== n);
         if (res && res.reps !== null && res.reps !== undefined) {
-            ex.done_sets.push({ set_index: n, reps: res.reps, weight: res.weight });
+            ex.done_sets.push({ set_index: n, reps: res.reps, weight: res.weight, rpe: res.rpe });
         }
+        delete rpeDrafts[`${eid}-${n}`];
         renderTraining();
         if (payload.done) {
             if (ex.rest_seconds) beginRest(pid, eid, ex.name, ex.rest_seconds);
@@ -1255,7 +1286,7 @@ async function showProgDetail(name) {
             <div class="prog-detail">
                 <button type="button" class="prog-back" data-action="prog-back">‹ 换个动作</button>
                 <div class="te-head"><span class="te-name">${escapeHtml(data.name)}</span>
-                    <span class="te-count">${data.points.length} 次训练 · ${data.total_sets} 组</span></div>
+                    <span class="te-count">${data.points.length} 次训练 · ${data.total_sets} 组${data.avg_rpe ? " · 平均 RPE " + data.avg_rpe : ""}</span></div>
                 <div class="prog-stats">
                     <div class="ps-cell"><div class="ps-value">${num(data.pr_weight)}</div><div class="ps-label">最好重量 kg</div></div>
                     <div class="ps-cell"><div class="ps-value">${num(lastP ? lastP.est_1rm : 0)}</div><div class="ps-label">预估 1RM kg</div></div>
@@ -1268,7 +1299,7 @@ async function showProgDetail(name) {
                         <div class="ex-item">
                             <div class="ex-name-cell">
                                 <div class="ex-label">${shortDate(p.date)} · ${weekdayOf(p.date)}</div>
-                                <div class="ex-detail">最大 ${p.max_weight} kg · 容量 ${num(p.volume)} kg · ${p.sets} 组 · 1RM≈${num(p.est_1rm)}</div>
+                                <div class="ex-detail">最大 ${p.max_weight} kg · 容量 ${num(p.volume)} kg · ${p.sets} 组 · 1RM≈${num(p.est_1rm)}${p.avg_rpe ? " · RPE " + p.avg_rpe : ""}</div>
                             </div>
                         </div>`).join("")}
                 </div>
@@ -1280,6 +1311,220 @@ async function showProgDetail(name) {
 
 $("#prog-close").addEventListener("click", closeProgSheet);
 progMask.addEventListener("click", (e) => { if (e.target === progMask) closeProgSheet(); });
+
+/* ================= 组合图（柱=容量 + 线=体重） ================= */
+function comboChart(weeks) {
+    if (!weeks || !weeks.length) return `<div class="chart-empty">暂无数据</div>`;
+    const W = 336, H = 208, L = 46, R = 46, T = 20, B = 36;
+    const vols = weeks.map((w) => Number(w.volume) || 0);
+    const maxVol = Math.max(...vols, 1);
+    const weights = weeks.map((w) => (w.body_weight === null || w.body_weight === undefined ? null : Number(w.body_weight)));
+    const present = weights.filter((v) => v !== null);
+    let wLo = present.length ? Math.min(...present) : 0;
+    let wHi = present.length ? Math.max(...present) : 0;
+    if (wHi === wLo) { wHi = wLo + 0.6; wLo = wLo - 0.6; }
+    const wPad = (wHi - wLo) * 0.18;
+    wLo -= wPad; wHi += wPad;
+
+    const plotW = W - L - R, plotH = H - T - B;
+    const step = plotW / weeks.length;
+    const barW = Math.max(10, step * 0.5);
+    const cx = (i) => L + step * (i + 0.5);
+    const wy = (v) => T + plotH * (1 - (v - wLo) / (wHi - wLo || 1));
+    const vy = (v) => T + plotH * (1 - v / (maxVol || 1));
+    const kfmt = (v) => (v >= 1000 ? (v / 1000).toFixed(v >= 10000 ? 0 : 1) + "k" : Math.round(v));
+
+    let grid = "";
+    for (let g = 0; g <= 2; g++) {
+        const val = (maxVol * g) / 2;
+        const yy = vy(val);
+        grid += `<line x1="${L}" y1="${yy.toFixed(1)}" x2="${W - R}" y2="${yy.toFixed(1)}" stroke="#e6ebf2" stroke-width="1"/>`;
+        grid += `<text x="${L - 6}" y="${(yy + 4).toFixed(1)}" text-anchor="end" font-size="10" fill="#9aa3b2">${kfmt(val)}</text>`;
+    }
+    // 右轴：体重
+    [wHi, wLo].forEach((v) => {
+        const yy = wy(v);
+        grid += `<text x="${W - R + 6}" y="${(yy + 4).toFixed(1)}" text-anchor="start" font-size="10" fill="#c2410c">${v.toFixed(1)}</text>`;
+    });
+
+    const bars = weeks.map((w, i) => {
+        const v = vols[i];
+        const y = vy(v);
+        const h = Math.max(0, T + plotH - y);
+        const fill = w.sessions > 0 ? "rgba(37,99,235,0.75)" : "rgba(148,163,184,0.35)";
+        return `<rect x="${(cx(i) - barW / 2).toFixed(1)}" y="${y.toFixed(1)}" width="${barW.toFixed(1)}" height="${h.toFixed(1)}" rx="3" fill="${fill}"/>`;
+    }).join("");
+
+    // 体重折线：只连连续的周
+    let segs = [];
+    let cur = [];
+    weights.forEach((v, i) => {
+        if (v === null) { if (cur.length) { segs.push(cur); cur = []; } return; }
+        cur.push([cx(i), wy(v)]);
+    });
+    if (cur.length) segs.push(cur);
+    const line = segs.map((seg) => {
+        const d = seg.map((c, i) => `${i ? "L" : "M"}${c[0].toFixed(1)},${c[1].toFixed(1)}`).join(" ");
+        const dots = seg.map((c) => `<circle cx="${c[0].toFixed(1)}" cy="${c[1].toFixed(1)}" r="3" fill="#f97316" stroke="#fff" stroke-width="1"/>`).join("");
+        return `<path d="${d}" fill="none" stroke="#f97316" stroke-width="2"/>${dots}`;
+    }).join("");
+
+    const labels = weeks.map((w, i) => {
+        const showEvery = weeks.length > 6 ? 2 : 1;
+        if (i % showEvery !== 0 && i !== weeks.length - 1) return "";
+        const d = String(w.week_start).slice(5);
+        return `<text x="${cx(i).toFixed(1)}" y="${H - B + 16}" text-anchor="middle" font-size="10" fill="#8b95a5">${d}</text>`;
+    }).join("");
+
+    return `<div class="chart-wrap">
+    <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet" role="img" aria-label="每周容量与体重">
+      ${grid}
+      ${bars}
+      ${line}
+      ${labels}
+      <text x="${L}" y="11" font-size="10" fill="#64748b">柱：容量 kg</text>
+      <text x="${W - R}" y="11" text-anchor="end" font-size="10" fill="#c2410c">线：体重 kg</text>
+    </svg>
+  </div>`;
+}
+
+async function loadWeekly() {
+    const panel = $("#week-panel");
+    if (!panel) return;
+    try {
+        const data = await api("/api/weekly?weeks=8");
+        const active = data.weeks.filter((w) => w.sessions > 0);
+        const latestWeight = [...data.weeks].reverse().find((w) => w.body_weight)?.body_weight;
+        $("#week-meta").textContent = active.length ? `近 8 周 · ${active.length} 周有训练` : "";
+        panel.innerHTML = `
+            <div class="week-stats">
+                <div class="wk-cell"><div class="wk-value">${num(data.avg_volume)}</div><div class="wk-label">周均容量 kg</div></div>
+                <div class="wk-cell"><div class="wk-value">${data.avg_sessions}</div><div class="wk-label">周均训练次数</div></div>
+                <div class="wk-cell"><div class="wk-value">${latestWeight ? latestWeight : "—"}</div><div class="wk-label">最近体重 kg</div></div>
+            </div>
+            ${active.length ? comboChart(data.weeks) : `<div class="empty sm"><span class="empty-icon">📊</span>近 8 周还没有训练记录<br>打卡后这里会出现容量与体重的周对比</div>`}`;
+    } catch (err) {
+        panel.innerHTML = `<div class="chart-empty">${escapeHtml(err.message)}</div>`;
+    }
+}
+
+/* ================= RPE：修改某组强度 ================= */
+document.addEventListener("change", async (e) => {
+    const sel = e.target.closest && e.target.closest(".ts-rpe");
+    if (!sel || !trainPlan) return;
+    const row = sel.closest(".ts-row");
+    const chk = row.querySelector(".ts-check");
+    if (!chk) return;
+    const eid = Number(chk.dataset.eid);
+    const n = Number(sel.dataset.set);
+    const val = sel.value === "" ? null : Number(sel.value);
+    const ex = trainPlan.exercises.find((x) => x.id === eid);
+    if (!ex) return;
+    const logged = (ex.done_sets || []).some((x) => x.set_index === n);
+    sel.classList.toggle("on", val !== null);
+
+    if (!logged) {
+        rpeDrafts[`${eid}-${n}`] = val;
+        return;
+    }
+    try {
+        const res = await api(`/api/plans/${trainPlan.id}/exercises/${eid}/sets/${n}`, {
+            method: "PUT",
+            body: JSON.stringify({ done: true, rpe: val }),
+        });
+        const item = ex.done_sets.find((x) => x.set_index === n);
+        if (item) item.rpe = res.rpe !== undefined ? res.rpe : val;
+        toast(val === null ? `已清除第 ${n} 组 RPE` : `第 ${n} 组 RPE ${val}`);
+    } catch (err) {
+        toast(err.message);
+    }
+});
+
+/* ================= 跳过 / 恢复动作 ================= */
+async function toggleSkipExercise(btn) {
+    if (!trainPlan) return;
+    const eid = Number(btn.dataset.eid);
+    const skip = btn.dataset.skip === "1";
+    const ex = trainPlan.exercises.find((x) => x.id === eid);
+    if (skip && ex && (ex.done_sets || []).length) {
+        if (!confirm(`「${ex.name}」已记录 ${ex.done_sets.length} 组，跳过会清空这些记录，继续？`)) return;
+    }
+    btn.disabled = true;
+    try {
+        const plan = await api(`/api/plans/${trainPlan.id}/exercises/${eid}/skip?skip=${skip}`, { method: "POST" });
+        trainPlan = plan;
+        renderTraining();
+        toast(skip ? `已跳过「${ex ? ex.name : "该动作"}」` : "已恢复该动作");
+    } catch (err) {
+        toast(err.message);
+    } finally {
+        btn.disabled = false;
+    }
+}
+
+/* ================= 替换动作 ================= */
+const swapMask = $("#swap-mask");
+let swapTarget = null;   // { pid, eid, name }
+
+async function openSwapSheet(btn) {
+    swapTarget = { pid: Number(btn.dataset.pid), eid: Number(btn.dataset.eid), name: btn.dataset.name };
+    $("#swap-from").textContent = `当前动作：${swapTarget.name}`;
+    $("#swap-name").value = "";
+    $("#swap-msg").className = "form-msg";
+    $("#swap-msg").textContent = "";
+    $("#swap-chips").innerHTML = `<span class="hint">加载中…</span>`;
+    swapMask.hidden = false;
+    document.body.style.overflow = "hidden";
+    setTimeout(() => $("#swap-name").focus(), 100);
+    try {
+        const names = await api("/api/progress/exercise-names");
+        const inPlan = new Set((trainPlan ? trainPlan.exercises : []).map((x) => x.name));
+        const options = names.map((n) => n.name).filter((n) => !inPlan.has(n));
+        $("#swap-chips").innerHTML = options.length
+            ? options.slice(0, 18).map((n) => `<button type="button" class="chip-btn" data-swap-name="${escapeHtml(n)}">${escapeHtml(n)}</button>`).join("")
+            : `<span class="hint">没有可替换的历史动作，直接输入名称即可</span>`;
+    } catch (err) {
+        $("#swap-chips").innerHTML = `<span class="hint">${escapeHtml(err.message)}</span>`;
+    }
+}
+
+function closeSwapSheet() {
+    swapMask.hidden = true;
+    swapTarget = null;
+    document.body.style.overflow = "";
+}
+
+$("#swap-close").addEventListener("click", closeSwapSheet);
+swapMask.addEventListener("click", (e) => { if (e.target === swapMask) closeSwapSheet(); });
+$("#swap-chips").addEventListener("click", (e) => {
+    const chip = e.target.closest("[data-swap-name]");
+    if (chip) $("#swap-name").value = chip.dataset.swapName;
+});
+$("#swap-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    if (!swapTarget) return;
+    const msg = $("#swap-msg");
+    const fail = (t) => { msg.className = "form-msg error"; msg.textContent = t; };
+    const name = $("#swap-name").value.trim();
+    if (!name) return fail("请填写新动作名称");
+    if (name === swapTarget.name) return fail("和当前动作名称一样，换个名字吧");
+    const btn = $("#swap-form .primary-btn");
+    btn.disabled = true;
+    try {
+        const plan = await api(`/api/plans/${swapTarget.pid}/exercises/${swapTarget.eid}`, {
+            method: "PATCH",
+            body: JSON.stringify({ name }),
+        });
+        trainPlan = plan;
+        closeSwapSheet();
+        renderTraining();
+        toast(`已替换为「${name}」`);
+    } catch (err) {
+        fail(err.message);
+    } finally {
+        btn.disabled = false;
+    }
+});
 
 /* ---------------- 修改动作 ---------------- */
 const exMask = $("#ex-mask");

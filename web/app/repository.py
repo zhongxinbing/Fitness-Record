@@ -137,7 +137,7 @@ class PlanRepository:
             return []
         ids = [r["id"] for r in rows]
         ex_rows = self.conn.execute(
-            "SELECT id, plan_id, name, sets, reps, weight, rest_seconds, note, sort_order "
+            "SELECT id, plan_id, name, sets, reps, weight, rest_seconds, skipped, note, sort_order "
             "FROM plan_exercises WHERE plan_id IN ({}) ORDER BY plan_id, sort_order, id".format(
                 ",".join("?" * len(ids))
             ),
@@ -149,7 +149,7 @@ class PlanRepository:
         logged: dict[int, list[dict]] = {eid: [] for eid in ex_ids}
         if ex_ids:
             set_rows = self.conn.execute(
-                "SELECT exercise_id, set_index, reps, weight FROM exercise_sets "
+                "SELECT exercise_id, set_index, reps, weight, rpe FROM exercise_sets "
                 "WHERE done = 1 AND exercise_id IN ({}) ORDER BY exercise_id, set_index".format(
                     ",".join("?" * len(ex_ids))
                 ),
@@ -160,12 +160,14 @@ class PlanRepository:
                     "set_index": sr["set_index"],
                     "reps": sr["reps"],
                     "weight": sr["weight"],
+                    "rpe": sr["rpe"],
                 })
 
         bucket: dict[int, list[dict]] = {pid: [] for pid in ids}
         for r in ex_rows:
             sets_done = logged.get(r["id"], [])
             actual_vol = round(sum((x["reps"] or 0) * (x["weight"] or 0) for x in sets_done), 2)
+            rpe_vals = [x["rpe"] for x in sets_done if x["rpe"] is not None]
             item = {
                 "id": r["id"],
                 "name": r["name"],
@@ -178,6 +180,8 @@ class PlanRepository:
                 "done_sets": sets_done,
                 "done_count": len(sets_done),
                 "actual_volume": actual_vol,
+                "skipped": bool(r["skipped"]),
+                "avg_rpe": round(sum(rpe_vals) / len(rpe_vals), 1) if rpe_vals else None,
             }
             bucket[r["plan_id"]].append(item)
 
@@ -196,9 +200,10 @@ class PlanRepository:
                 "exercise_count": len(ex),
                 "total_sets": sum(e["sets"] for e in ex),
                 "total_volume": round(sum(e["volume"] for e in ex), 2),
-                "done_set_count": sum(e["done_count"] for e in ex),
-                "total_set_count": sum(e["sets"] for e in ex),
-                "actual_volume": round(sum(e["actual_volume"] for e in ex), 2),
+                "done_set_count": sum(e["done_count"] for e in ex if not e["skipped"]),
+                "total_set_count": sum(e["sets"] for e in ex if not e["skipped"]),
+                "actual_volume": round(sum(e["actual_volume"] for e in ex if not e["skipped"]), 2),
+                "done_exercise_count": sum(1 for e in ex if e["done_count"] >= e["sets"] and not e["skipped"]),
             })
         return result
 
@@ -259,8 +264,9 @@ class PlanRepository:
             raise
 
     def log_set(self, plan_id: int, exercise_id: int, set_index: int,
-                done: bool, reps: Optional[int], weight: Optional[float]) -> Optional[dict]:
-        """勾选/取消某一组：done=True 写入实际次数与重量，done=False 删除该组记录。"""
+                done: bool, reps: Optional[int], weight: Optional[float],
+                rpe: Optional[float] = None) -> Optional[dict]:
+        """勾选/取消某一组：done=True 写入实际次数、重量与 RPE，done=False 删除该组记录。"""
         row = self.conn.execute(
             "SELECT e.sets, e.reps, e.weight FROM plan_exercises e "
             "JOIN training_plans p ON p.id = e.plan_id "
@@ -278,19 +284,57 @@ class PlanRepository:
                 (exercise_id, set_index),
             )
             self.conn.commit()
-            return {"set_index": set_index, "reps": None, "weight": None, "done": False}
+            return {"set_index": set_index, "reps": None, "weight": None, "rpe": None, "done": False}
 
-        actual_reps = row["reps"] if reps is None else int(reps)
-        actual_weight = row["weight"] if weight is None else float(weight)
+        existing = self.conn.execute(
+            "SELECT reps, weight FROM exercise_sets WHERE exercise_id = ? AND set_index = ?",
+            (exercise_id, set_index),
+        ).fetchone()
+        if reps is not None:
+            actual_reps = int(reps)
+        elif existing is not None and existing["reps"] is not None:
+            actual_reps = int(existing["reps"])   # 只补 RPE 时保留原有实际值
+        else:
+            actual_reps = int(row["reps"])
+        if weight is not None:
+            actual_weight = float(weight)
+        elif existing is not None and existing["weight"] is not None:
+            actual_weight = float(existing["weight"])
+        else:
+            actual_weight = float(row["weight"])
+        # RPE：不传时保留已有值（便于先勾组、再补强度）
         self.conn.execute(
-            "INSERT INTO exercise_sets (exercise_id, set_index, done, reps, weight, done_at) "
-            "VALUES (?, ?, 1, ?, ?, datetime('now', 'localtime')) "
+            "INSERT INTO exercise_sets (exercise_id, set_index, done, reps, weight, rpe, done_at) "
+            "VALUES (?, ?, 1, ?, ?, ?, datetime('now', 'localtime')) "
             "ON CONFLICT(exercise_id, set_index) DO UPDATE SET "
-            "done = 1, reps = excluded.reps, weight = excluded.weight, done_at = excluded.done_at",
-            (exercise_id, set_index, actual_reps, actual_weight),
+            "done = 1, reps = excluded.reps, weight = excluded.weight, "
+            "rpe = excluded.rpe, done_at = excluded.done_at",
+            (exercise_id, set_index, actual_reps, actual_weight, rpe),
         )
         self.conn.commit()
-        return {"set_index": set_index, "reps": actual_reps, "weight": actual_weight, "done": True}
+        return {"set_index": set_index, "reps": actual_reps, "weight": actual_weight,
+                "rpe": rpe, "done": True}
+
+    def set_skipped(self, plan_id: int, exercise_id: int, skipped: bool) -> Optional[int]:
+        """训练中跳过/恢复某个动作；跳过时清空该动作已记录的组，返回被清掉的组数。"""
+        row = self.conn.execute(
+            "SELECT e.id FROM plan_exercises e JOIN training_plans p ON p.id = e.plan_id "
+            "WHERE e.id = ? AND e.plan_id = ? AND p.user_id = ?",
+            (exercise_id, plan_id, self.user_id),
+        ).fetchone()
+        if row is None:
+            return None
+        cleared = 0
+        if skipped:
+            cleared = self.conn.execute(
+                "DELETE FROM exercise_sets WHERE exercise_id = ?", (exercise_id,)
+            ).rowcount
+        self.conn.execute(
+            "UPDATE plan_exercises SET skipped = ? WHERE id = ?",
+            (1 if skipped else 0, exercise_id),
+        )
+        self.conn.commit()
+        return int(cleared)
 
     def update_plan(self, plan_id: int, fields: dict) -> bool:
         """更新计划本身的日期/部位/标题/备注。"""
@@ -339,7 +383,7 @@ class PlanRepository:
         eids = [r["eid"] for r in rows]
         logged: dict[int, list] = {eid: [] for eid in eids}
         set_rows = self.conn.execute(
-            "SELECT exercise_id, reps, weight FROM exercise_sets "
+            "SELECT exercise_id, reps, weight, rpe FROM exercise_sets "
             "WHERE done = 1 AND exercise_id IN ({})".format(",".join("?" * len(eids))),
             eids,
         ).fetchall()
@@ -358,15 +402,25 @@ class PlanRepository:
             max_weight = max((wt for _, wt in reps_list), default=0.0)
             est_1rm = max((wt * (1 + rep / 30.0) for rep, wt in reps_list if wt > 0), default=0.0)
 
+            rpe_vals = [s["rpe"] for s in sets if s["rpe"] is not None]
             point = buckets.setdefault(r["plan_date"], {
-                "date": r["plan_date"], "max_weight": 0.0, "volume": 0.0, "sets": 0, "est_1rm": 0.0,
+                "date": r["plan_date"], "max_weight": 0.0, "volume": 0.0, "sets": 0,
+                "est_1rm": 0.0, "_rpe": [],
             })
+            point["_rpe"].extend(rpe_vals)
             point["max_weight"] = max(point["max_weight"], float(max_weight))
             point["volume"] = round(point["volume"] + volume, 2)
             point["sets"] += len(reps_list)
             point["est_1rm"] = round(max(point["est_1rm"], float(est_1rm)), 1)
 
-        points = [buckets[k] for k in sorted(buckets)]
+        points = []
+        for k in sorted(buckets):
+            b = buckets[k]
+            rpes = b.pop("_rpe", [])
+            b["avg_rpe"] = round(sum(rpes) / len(rpes), 1) if rpes else None
+            points.append(b)
+        all_rpes = [p["avg_rpe"] for p in points if p["avg_rpe"] is not None]
+        avg_rpe = round(sum(all_rpes) / len(all_rpes), 1) if all_rpes else None
         pr_weight = max((p["max_weight"] for p in points), default=0.0)
         pr_date = next((p["date"] for p in points if p["max_weight"] == pr_weight), None)
         return {
@@ -376,6 +430,68 @@ class PlanRepository:
             "pr_date": pr_date,
             "best_volume": max((p["volume"] for p in points), default=0.0),
             "total_sets": sum(p["sets"] for p in points),
+            "avg_rpe": avg_rpe,
+        }
+
+    def weekly(self, weeks: int = 8) -> dict:
+        """按自然周（周一…周日）汇总训练容量、组数、次数与周末体重，用于周视图。"""
+        n = max(1, min(int(weeks), 52))
+        this_week = _week_start(date.today())
+        first_week = this_week - timedelta(days=7 * (n - 1))
+        last_day = this_week + timedelta(days=6)
+
+        plans = self._attach_exercises(
+            self.conn.execute(
+                "SELECT * FROM training_plans WHERE user_id = ? AND status = 'done' "
+                "AND plan_date >= ? AND plan_date <= ? ORDER BY plan_date, id",
+                (self.user_id, first_week.isoformat(), last_day.isoformat()),
+            ).fetchall()
+        )
+
+        week_map = {
+            (first_week + timedelta(days=7 * i)).isoformat(): {
+                "week_start": (first_week + timedelta(days=7 * i)).isoformat(),
+                "sessions": 0, "volume": 0.0, "sets": 0, "body_weight": None,
+            }
+            for i in range(n)
+        }
+
+        for p in plans:
+            try:
+                d = date.fromisoformat(p["plan_date"])
+            except ValueError:
+                continue
+            ws = _week_start(d).isoformat()
+            bucket = week_map.get(ws)
+            if bucket is None:
+                continue
+            bucket["sessions"] += 1
+            # 有逐组记录用实际容量，否则用计划容量兜底
+            bucket["volume"] = round(bucket["volume"] + (p["actual_volume"] or p["total_volume"]), 2)
+            bucket["sets"] += p["done_set_count"] or p["total_sets"]
+
+        body_rows = self.conn.execute(
+            "SELECT date, weight FROM body_records WHERE user_id = ? "
+            "AND date >= ? AND date <= ? ORDER BY date",
+            (self.user_id, first_week.isoformat(), last_day.isoformat()),
+        ).fetchall()
+        for br in body_rows:
+            try:
+                d = date.fromisoformat(br["date"])
+            except ValueError:
+                continue
+            ws = _week_start(d).isoformat()
+            bucket = week_map.get(ws)
+            if bucket is not None and br["weight"]:
+                bucket["body_weight"] = float(br["weight"])  # 同周取较晚的一条
+
+        weeks_list = [week_map[k] for k in sorted(week_map)]
+        active = [w for w in weeks_list if w["sessions"] > 0]
+        return {
+            "weeks": weeks_list,
+            "avg_volume": round(sum(w["volume"] for w in active) / len(active), 2) if active else 0,
+            "avg_sessions": round(sum(w["sessions"] for w in active) / len(active), 2) if active else 0,
+            "week_count": len(active),
         }
 
     def copy_from(self, plan_id: int, plan_date: str) -> Optional[int]:

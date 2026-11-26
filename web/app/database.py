@@ -54,6 +54,7 @@ CREATE TABLE IF NOT EXISTS plan_exercises (
     reps        INTEGER NOT NULL DEFAULT 10,
     weight      REAL    NOT NULL DEFAULT 0,
     rest_seconds INTEGER NOT NULL DEFAULT 90,
+    skipped     INTEGER NOT NULL DEFAULT 0,
     note        TEXT    NOT NULL DEFAULT '',
     sort_order  INTEGER NOT NULL DEFAULT 0
 );
@@ -75,6 +76,7 @@ CREATE TABLE IF NOT EXISTS exercise_sets (
     done        INTEGER NOT NULL DEFAULT 0,
     reps        INTEGER,
     weight      REAL,
+    rpe         REAL,
     done_at     TEXT,
     UNIQUE (exercise_id, set_index)
 );
@@ -150,6 +152,18 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
             "ALTER TABLE plan_exercises ADD COLUMN rest_seconds INTEGER NOT NULL DEFAULT 90"
         )
         logger.info("已为 plan_exercises 补充 rest_seconds 列")
+    if "skipped" not in ex_columns:
+        # 训练中「跳过该动作」，跳过的动作不计入计划必做组数
+        conn.execute(
+            "ALTER TABLE plan_exercises ADD COLUMN skipped INTEGER NOT NULL DEFAULT 0"
+        )
+        logger.info("已为 plan_exercises 补充 skipped 列")
+
+    set_columns = {r["name"] for r in conn.execute("PRAGMA table_info(exercise_sets)").fetchall()}
+    if set_columns and "rpe" not in set_columns:
+        # 每组主观强度（RPE 1–10，0.5 步进）
+        conn.execute("ALTER TABLE exercise_sets ADD COLUMN rpe REAL")
+        logger.info("已为 exercise_sets 补充 rpe 列")
 
     # 多用户支持：历史单机数据先落为 user_id = 0，由首个注册用户认领
     for table in ("training_plans", "body_records"):

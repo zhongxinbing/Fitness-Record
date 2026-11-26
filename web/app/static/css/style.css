@@ -1050,3 +1050,57 @@ body {
 }
 .head-pick:active { background: var(--primary-soft); }
 .empty.sm { padding: 22px 10px; font-size: 13px; }
+
+/* ================= RPE / 跳过 / 替换 ================= */
+.ts-in.ts-r { width: 46px; }
+.ts-rpe {
+    height: 34px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: #fff;
+    color: #475569;
+    font-size: 12px;
+    padding: 0 2px;
+    flex-shrink: 0;
+    max-width: 66px;
+}
+.ts-rpe.on { border-color: #f59e0b; color: #b45309; background: #fffbeb; font-weight: 700; }
+.ts-row.done .ts-rpe.on { border-color: #f59e0b; }
+
+.te-actions { display: flex; gap: 6px; margin-top: 8px; }
+.te-act {
+    border: 1px solid var(--line);
+    background: #fff;
+    color: #64748b;
+    border-radius: 8px;
+    padding: 5px 10px;
+    font-size: 12px;
+    cursor: pointer;
+}
+.te-act.warn { color: #b45309; border-color: #fde68a; background: #fffbeb; }
+.te-card.is-skipped { opacity: 0.6; background: #f6f7f9; }
+.te-card.is-skipped .ts-row { display: none; }
+.skip-tag {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 8px;
+    background: #f1f5f9;
+    color: #94a3b8;
+    font-size: 11px;
+    font-weight: 600;
+    margin-left: 6px;
+}
+.ex-rpe {
+    margin-top: 2px;
+    font-size: 11px;
+    color: #b45309;
+}
+
+/* 周视图 */
+.week-stats { display: flex; gap: 8px; margin-bottom: 10px; }
+.wk-cell { flex: 1; background: var(--card); border: 1px solid var(--line-soft); border-radius: 10px; padding: 10px; text-align: center; }
+.wk-value { font-size: 17px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.wk-label { font-size: 11px; color: var(--text-sub); margin-top: 3px; }
+
+/* 替换弹层需要盖在训练模式之上（训练视图 z-index 60） */
+#swap-mask { z-index: 75; }

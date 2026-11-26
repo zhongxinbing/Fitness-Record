@@ -17,10 +17,13 @@
 | 动作可编辑 | 每个动作行右侧「✎」打开编辑面板，名称/组数/次数/重量/休息时长都可改；改名撞重名返回 409，历史（已打卡）计划只读，需先「撤销打卡」再改 |
 | 组间休息计时 | 每个动作可自定义每组休息秒数（1–600，默认 90）；点动作上的「⏱」唤起倒计时面板，支持预设 30/45/60/90/120/180 秒、±15 秒微调、暂停/继续，到点响铃 + 震动提示；关闭面板后底部悬浮计时条继续倒计时 |
 | 训练专注模式 | 计划卡片点「开始训练」进入全屏训练视图：逐动作列出每组，勾选即记录该组实际次数与重量，勾完自动开始该动作的组间休息倒计时，顶部可「跳过」；全部组完成后点「完成训练并打卡」 |
+| 逐组 RPE | 每组可记主观强度 RPE（6–10，0.5 步进）：勾组前选好会随组一起存，勾完也能改或清除；训练卡片显示该动作平均 RPE，进步明细里带每次训练的平均 RPE |
+| 替换 / 跳过动作 | 训练中每个动作都有「↔ 替换」和「跳过这个动作」：替换只改动作名（组数/次数/重量/休息不变，可从历史动作里点选），跳过的动作变灰、不计入必做组数，可随时「恢复」；跳过时若已有记录会提示并清空 |
 | 逐组记录 | 每组可单独勾选/取消，实际重量与次数可现场改（不影响计划值）；取消某组后可重新记录。卡片上显示「已完成 2/3 组 · 实际容量 xxx kg」与每动作「已做 2 组：10×60kg / 8×60kg」 |
 | 计划整体编辑 | 卡片右上「✎」改日期/部位/标题/备注，保存后立刻生效（改到别的日期会从今日列表移走） |
 | 打卡 | 计划完成后点「完成打卡」转入历史；历史里可「撤销打卡」退回计划 |
 | 体重曲线 | 历史页「体重」区块记体重与体脂，展示最新值、较上次增减与折线趋势，可删除单条记录 |
+| 周视图 | 历史页顶部按自然周（周一…周日）汇总近 8 周：柱状为该周训练容量、折线为该周体重，另给周均容量 / 周均训练次数 / 最近体重 |
 | 动作进步 | 历史页「动作进步」按动作看历史最大重量折线、最好重量 PR、单次容量与预估 1RM（Epley 公式），并列出每次训练明细 |
 | 历史 | 按天聚合：日期 + 星期 + 当天训练部位 + 每次计划的动作明细，顶部有累计/本周/组数/容量与部位分布 |
 | 数据自动汇总 | 每个动作算容量（组数 × 次数 × 重量），每个计划算总组数/总容量，每一天算总容量 |
@@ -47,9 +50,9 @@ training_plans               一条训练计划（可多部位，按 user_id 隔
 ├── id, plan_date, body_parts(逗号分隔, 如 "胸,肩"), title, note
 ├── status  planned(待完成) / done(已打卡)
 └── plan_exercises           计划内动作（一对多，级联删除）
-    ├── id, plan_id, name, sets, reps, weight, rest_seconds, sort_order
+    ├── id, plan_id, name, sets, reps, weight, rest_seconds, skipped, sort_order
     └── exercise_sets        逐组打卡记录（一对多，级联删除，UNIQUE(动作,组号)）
-        └── id, exercise_id, set_index, done, reps, weight, done_at
+        └── id, exercise_id, set_index, done, reps, weight, rpe, done_at
 
 body_records                 体重记录（按 user_id 隔离）
 └── id, user_id, date, weight, body_fat, note, created_at
@@ -127,7 +130,8 @@ python main.py
 | POST | `/api/plans/{id}/copy` | 从历史复制该计划到今天（可用 `?plan_date=` 指定日期） |
 | POST | `/api/plans/{id}/exercises` | 追加动作 |
 | PATCH | `/api/plans/{id}` | 整体修改计划：日期/部位/标题/备注任意子集，至少一项，空对象 422 |
-| PUT | `/api/plans/{id}/exercises/{eid}/sets/{n}` | 记录/取消第 n 组：`{"done":true,"reps":12,"weight":60}` 记录实际值，`{"done":false}` 取消；组号超出计划组数 404 |
+| PUT | `/api/plans/{id}/exercises/{eid}/sets/{n}` | 记录/取消第 n 组：`{"done":true,"reps":12,"weight":60,"rpe":8.5}` 记录实际值（不传 reps/weight 保留已有、缺省沿用计划值；RPE 需为 0.5 的整数倍且 1–10），`{"done":false}` 取消；组号超出计划组数 404 |
+| POST | `/api/plans/{id}/exercises/{eid}/skip?skip=true\|false` | 跳过 / 恢复该动作（跳过会清空其已记录组），返回更新后的计划 |
 | PATCH | `/api/plans/{id}/exercises/{eid}` | 局部修改动作：只传要改的字段（名称/组数/次数/重量/休息），空对象 422，改名重复 409 |
 | DELETE | `/api/plans/{id}/exercises/{eid}` | 删除动作 |
 | DELETE | `/api/plans/{id}` | 删除计划（级联动作） |
@@ -135,6 +139,7 @@ python main.py
 | GET | `/api/stats` | 概览统计 |
 | GET/POST | `/api/bodies` | 体重记录列表 / 新增 |
 | GET | `/api/progress/exercise-names` | 有历史的动作名列表（次数、最近训练日） |
+| GET | `/api/weekly?weeks=8` | 周视图：每周容量/组数/训练次数/体重，及周均容量与周均次数 |
 | GET | `/api/progress/exercise?name=` | 某动作的进步数据：每次最大重量/容量/组数/预估 1RM、PR、最好容量；无历史 404 |
 | GET | `/health` | 健康检查 |
 
