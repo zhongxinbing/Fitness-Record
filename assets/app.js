@@ -8,21 +8,8 @@ const $$ = (sel) => document.querySelectorAll(sel);
 
 /* ---------------- 通用 ---------------- */
 async function api(url, options = {}) {
-    const resp = await fetch(url, { headers: { "Content-Type": "application/json" }, ...options });
-    if (resp.status === 204) return null;
-    const data = await resp.json().catch(() => ({}));
-    if (resp.status === 401 && !options.ignoreAuth) {
-        // 会话失效：回到登录页，避免页面停在半截数据上
-        requireLogin();
-        throw new Error(data.detail || "请先登录");
-    }
-    if (!resp.ok) {
-        const detail = Array.isArray(data.detail)
-            ? data.detail.map((d) => `${(d.loc || []).slice(1).join(".")} ${d.msg}`).join("；")
-            : data.detail || "请求失败";
-        throw new Error(detail);
-    }
-    return data;
+    // 静态版：不请求服务器，直接走浏览器本地数据层（store.js）
+    return FitnessStore.call(url, options);
 }
 
 function todayISO() {
@@ -1511,11 +1498,12 @@ $("#swap-form").addEventListener("submit", async (e) => {
     const btn = $("#swap-form .primary-btn");
     btn.disabled = true;
     try {
-        const plan = await api(`/api/plans/${swapTarget.pid}/exercises/${swapTarget.eid}`, {
+        await api(`/api/plans/${swapTarget.pid}/exercises/${swapTarget.eid}`, {
             method: "PATCH",
             body: JSON.stringify({ name }),
         });
-        trainPlan = plan;
+        // 动作修改接口只返回单个动作，训练界面要的是整个计划，重新取一次
+        trainPlan = await api(`/api/plans/${swapTarget.pid}`);
         closeSwapSheet();
         renderTraining();
         toast(`已替换为「${name}」`);
@@ -1591,105 +1579,82 @@ $("#ex-form").addEventListener("submit", async (e) => {
     }
 });
 
-/* ================= 账号与登录 ================= */
-let CURRENT_USER = null;
-let authMode = "login";
-
-function showAuth(message) {
-    $("#auth-view").hidden = false;
-    $("#app-view").hidden = true;
-    document.body.classList.add("auth-mode");
-    const msg = $("#auth-msg");
-    msg.className = message ? "form-msg error" : "form-msg";
-    msg.textContent = message || "";
-    setTimeout(() => $("#auth-username").focus(), 60);
-}
-
-function requireLogin() {
-    CURRENT_USER = null;
-    stopTimer();
-    $("#timer-bar").hidden = true;
-    document.body.style.overflow = "";
-    $("#sheet-mask").hidden = true;
-    $("#timer-mask").hidden = true;
-    showAuth("登录已过期，请重新登录");
-}
+/* ================= 本机模式（无账号） ================= */
+const CURRENT_USER = { id: 1, username: "本机" };
 
 function showApp(user) {
-    CURRENT_USER = user;
-    $("#auth-view").hidden = true;
     $("#app-view").hidden = false;
-    document.body.classList.remove("auth-mode");
     $("#user-name").textContent = user.username;
     bootData();
 }
 
-function setAuthMode(mode) {
-    authMode = mode;
-    $$(".auth-tab").forEach((b) => b.classList.toggle("active", b.dataset.mode === mode));
-    $("#confirm-field").hidden = mode !== "register";
-    $("#auth-submit").textContent = mode === "register" ? "注册并登录" : "登录";
-    $("#auth-password").autocomplete = mode === "register" ? "new-password" : "current-password";
-    $("#auth-msg").className = "form-msg";
-    $("#auth-msg").textContent = "";
-    $("#auth-confirm").value = "";
+/* ---------------- 备份 / 导入 / 清空 ---------------- */
+const backupMask = $("#backup-mask");
+
+function openBackup() {
+    const s = FitnessStore.stats();
+    $("#backup-stats").textContent =
+        `当前数据：${s.plans} 个计划（其中 ${s.done} 次已完成）、${s.bodies} 条体重记录，约 ${(s.bytes / 1024).toFixed(1)} KB`;
+    $("#backup-msg").className = "form-msg";
+    $("#backup-msg").textContent = "";
+    $("#backup-file").value = "";
+    backupMask.hidden = false;
+    document.body.style.overflow = "hidden";
 }
 
-$$(".auth-tab").forEach((btn) => {
-    btn.addEventListener("click", () => setAuthMode(btn.dataset.mode));
+function closeBackup() {
+    backupMask.hidden = true;
+    document.body.style.overflow = "";
+}
+
+$("#backup-btn").addEventListener("click", openBackup);
+$("#backup-close").addEventListener("click", closeBackup);
+backupMask.addEventListener("click", (e) => { if (e.target === backupMask) closeBackup(); });
+document.addEventListener("keydown", (e) => { if (e.key === "Escape" && !backupMask.hidden) closeBackup(); });
+
+$("#backup-export").addEventListener("click", () => {
+    const blob = FitnessStore.exportBlob();
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = `健身记录备份-${TODAY}.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(a.href), 3000);
+    const msg = $("#backup-msg");
+    msg.className = "form-msg ok";
+    msg.textContent = "已导出，文件在浏览器的下载目录";
 });
 
-$("#auth-form").addEventListener("submit", async (e) => {
-    e.preventDefault();
-    const username = $("#auth-username").value.trim();
-    const password = $("#auth-password").value;
-    const msg = $("#auth-msg");
-
-    const fail = (text) => { msg.className = "form-msg error"; msg.textContent = text; };
-    if (!username) return fail("请输入用户名");
-    if (!password) return fail("请输入密码");
-    if (authMode === "register") {
-        if (username.length < 2) return fail("用户名至少 2 位");
-        if (password.length < 8) return fail("密码至少 8 位");
-        if (password !== $("#auth-confirm").value) return fail("两次输入的密码不一致");
+$("#backup-import").addEventListener("click", async () => {
+    const msg = $("#backup-msg");
+    const file = $("#backup-file").files[0];
+    if (!file) {
+        msg.className = "form-msg error";
+        msg.textContent = "先选择一个 .json 备份文件";
+        return;
     }
-
-    const submit = $("#auth-submit");
-    submit.disabled = true;
-    submit.textContent = authMode === "register" ? "注册中…" : "登录中…";
-    msg.className = "form-msg";
-    msg.textContent = "";
+    if (!confirm("导入会覆盖当前浏览器里的全部数据，确定继续？")) return;
     try {
-        const data = await api(`/api/auth/${authMode}`, {
-            method: "POST",
-            body: JSON.stringify({ username, password }),
-            ignoreAuth: true,
-        });
-        $("#auth-form").reset();
-        $("#auth-password").value = "";
-        $("#auth-confirm").value = "";
-        showApp(data.user);
-        if (data.adopted_legacy) toast("已把之前本机保存的训练数据归到你的账号");
-        else toast(authMode === "register" ? "注册成功，开始记录吧" : `欢迎回来，${data.user.username}`);
+        const text = await file.text();
+        const count = FitnessStore.importJSON(text);
+        closeBackup();
+        toast(`已导入 ${count} 个计划`);
+        booted = false;
+        await refreshAll();
     } catch (err) {
-        fail(err.message);
-    } finally {
-        submit.disabled = false;
-        submit.textContent = authMode === "register" ? "注册并登录" : "登录";
+        msg.className = "form-msg error";
+        msg.textContent = err.message || "导入失败";
     }
 });
 
-$("#logout-btn").addEventListener("click", async () => {
-    if (!confirm("确定退出登录？下次需重新输入密码。")) return;
-    try {
-        await api("/api/auth/logout", { method: "POST", ignoreAuth: true });
-    } catch (err) {
-        /* 会话可能已失效，退出动作照常执行 */
-    }
-    requireLogin();
-    const m = $("#auth-msg");
-    m.className = "form-msg";
-    m.textContent = "已退出登录";
+$("#backup-clear").addEventListener("click", () => {
+    if (!confirm("将清空本机所有训练与体重数据，且无法恢复。继续？")) return;
+    if (!confirm("最后确认：真的清空？建议先导出备份。")) return;
+    FitnessStore.clearAll();
+    closeBackup();
+    refreshAll();
+    toast("已清空本机数据");
 });
 
 /* ---------------- 数据加载入口 ---------------- */
@@ -1705,11 +1670,5 @@ async function bootData() {
 
 /* ---------------- 初始化 ---------------- */
 (async function init() {
-    document.body.classList.add("auth-mode");
-    try {
-        const me = await api("/api/auth/me", { ignoreAuth: true });
-        showApp(me);
-    } catch (err) {
-        showAuth();
-    }
+    showApp(CURRENT_USER);
 })();

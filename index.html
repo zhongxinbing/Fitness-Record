@@ -4,59 +4,21 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
     <meta name="theme-color" content="#0f172a">
-    <title>{{ app_name }}</title>
+    <title>健身记录 · 本机版</title>
     <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='26' font-size='26'>🏋️</text></svg>">
-    <link rel="stylesheet" href="/static/css/style.css">
+    <link rel="stylesheet" href="assets/style.css">
 </head>
 <body>
-    <!-- ================= 登录 / 注册 ================= -->
-    <section class="auth-view" id="auth-view" hidden>
-        <div class="auth-card">
-            <div class="auth-brand">
-                <span class="auth-logo">🏋️</span>
-                <h2>健身计划</h2>
-                <p class="auth-slogan">记录每一次训练，看见每一点进步</p>
-            </div>
-
-            <div class="auth-tabs" role="tablist">
-                <button type="button" class="auth-tab active" data-mode="login" role="tab">登录</button>
-                <button type="button" class="auth-tab" data-mode="register" role="tab">注册</button>
-            </div>
-
-            <form id="auth-form" novalidate>
-                <div class="field">
-                    <label for="auth-username">用户名</label>
-                    <input type="text" id="auth-username" autocomplete="username" maxlength="20"
-                           placeholder="2–20 位，字母 / 数字 / 下划线">
-                </div>
-                <div class="field mt-12">
-                    <label for="auth-password">密码</label>
-                    <input type="password" id="auth-password" autocomplete="current-password"
-                           maxlength="128" placeholder="至少 8 位">
-                </div>
-                <div class="field mt-12" id="confirm-field" hidden>
-                    <label for="auth-confirm">确认密码</label>
-                    <input type="password" id="auth-confirm" autocomplete="new-password" maxlength="128"
-                           placeholder="再输入一次密码">
-                </div>
-                <button type="submit" class="primary-btn mt-14" id="auth-submit">登录</button>
-                <p class="form-msg" id="auth-msg" aria-live="polite"></p>
-            </form>
-
-            <p class="auth-foot">数据保存在自己的服务器，密码经加盐哈希后存储，不回传明文</p>
-        </div>
-    </section>
-
-    <div id="app-view" hidden>
+    <div id="app-view">
     <header class="app-header">
         <div class="head-row">
             <div class="head-text">
                 <h1>健身计划</h1>
                 <p class="sub" id="header-sub"></p>
             </div>
-            <button type="button" class="user-chip" id="logout-btn" title="退出登录">
-                <span id="user-name">…</span>
-                <span class="uc-exit">退出</span>
+            <button type="button" class="user-chip" id="backup-btn" title="数据备份">
+                <span id="user-name">本机</span>
+                <span class="uc-exit">备份</span>
             </button>
         </div>
     </header>
@@ -429,8 +391,35 @@
     </div>
     </div><!-- /#app-view -->
 
+
+    <!-- ================= 数据备份（静态版专用） ================= -->
+    <div class="sheet-mask" id="backup-mask" hidden>
+        <div class="sheet" role="dialog" aria-modal="true" aria-label="数据备份">
+            <div class="sheet-grab"></div>
+            <div class="sheet-head">
+                <span>数据备份</span>
+                <button type="button" class="sheet-close" id="backup-close" aria-label="关闭">✕</button>
+            </div>
+            <div class="sheet-body">
+                <p class="hint" id="backup-stats">正在统计…</p>
+                <p class="hint">数据保存在这个浏览器里，换手机、换浏览器、清缓存都会丢。
+                   建议每周导出一次 JSON 备份；换设备时导入即可原样恢复。</p>
+                <div class="field mt-14">
+                    <label for="backup-file">选择备份文件（.json）</label>
+                    <input type="file" id="backup-file" accept="application/json,.json">
+                </div>
+                <button type="button" class="primary-btn mt-14" id="backup-export">导出备份到本地</button>
+                <button type="button" class="ghost-btn mt-10" id="backup-import">从所选文件导入（覆盖当前数据）</button>
+                <p class="form-msg" id="backup-msg" aria-live="polite"></p>
+                <p class="hint mt-20">不想再用了？清空不可恢复，请先导出。</p>
+                <button type="button" class="ghost-btn danger-text" id="backup-clear">清空本机所有数据</button>
+            </div>
+        </div>
+    </div>
+
     <div class="toast" id="toast" hidden></div>
 
-    <script src="/static/js/app.js"></script>
+    <script src="assets/store.js"></script>
+    <script src="assets/app.js"></script>
 </body>
 </html>

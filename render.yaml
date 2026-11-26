@@ -1,41 +1,17 @@
-# Render Blueprint：仓库里有这个文件后，New → Blueprint 就能一键建好服务
-# 注意：持久磁盘（disk）只有付费实例（starter 及以上）支持；免费实例请用文件末尾的注释版配置
+# Render Blueprint：纯静态站点（HTML + CSS + JS，无后端、无数据库、无磁盘）
+# 用法：Render 控制台 → New → Blueprint → 选仓库 → Apply
 services:
   - type: web
-    name: fitness-tracker
-    env: docker
-    plan: starter
-    region: singapore      # 离国内最近；也可改 oregon / frankfurt
-    dockerfilePath: ./Dockerfile
-    healthCheckPath: /health
+    name: fitness-tracker            # 决定域名：https://fitness-tracker.onrender.com（重名会被要求改）
+    runtime: static                  # 静态站点；若提示不支持，把这行换成 env: static
+    buildCommand: ""                 # 没有构建步骤，直接发布文件
+    staticPublishPath: .             # 发布根目录 = index.html 所在目录
     autoDeploy: true
-    envVars:
-      - key: FIT_DB_PATH        # 库文件落在持久盘上，重新部署不丢数据
-        value: /var/data/fitness.db
-      - key: FIT_COOKIE_SECURE  # Render 默认 HTTPS 访问，Cookie 必须带 Secure
-        value: "true"
-      - key: FIT_TIMEZONE
-        value: Asia/Shanghai
-      - key: FIT_DEBUG
-        value: "false"
-    disk:
-      name: fitness-data
-      mountPath: /var/data
-      sizeGB: 1
-
-# ── 免费实例版（没有持久盘，每次重新部署/实例重启数据都会清空，只适合试用）──
-# 把上面整段换成：
+    headers:
+      # 静态资源可以放心缓存；改代码后新的文件名不变，所以给 1 小时，别设太长
+      - path: /assets/*
+        name: Cache-Control
+        value: public, max-age=3600
 #
-# services:
-#   - type: web
-#     name: fitness-tracker
-#     env: docker
-#     plan: free
-#     region: singapore
-#     dockerfilePath: ./Dockerfile
-#     healthCheckPath: /health
-#     envVars:
-#       - key: FIT_COOKIE_SECURE
-#         value: "true"
-#       - key: FIT_TIMEZONE
-#         value: Asia/Shanghai
+# 说明：整站只有一个 index.html，没有前端路由，因此不需要写 SPA 的 rewrite 规则。
+# 加 rewrite /* → /index.html 反而可能把 assets/*.js 请求也重定向，导致白屏。
