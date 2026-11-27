@@ -65,13 +65,39 @@
 
     /* ---------------- 持久化 ---------------- */
     function emptyDB() {
-        return { version: 1, seq: { plan: 1, ex: 1, body: 1 }, plans: [], bodies: [] };
+        return {
+            version: 2,
+            seq: { plan: 1, ex: 1, body: 1, tpl: 1, meas: 1, cardio: 1 },
+            plans: [],
+            bodies: [],
+            templates: [],
+            goals: { target_weight: null, weekly_sessions: null, target_date: null },
+            measurements: [],
+            cardios: [],
+            trash: [],
+            meta: { last_export_at: null, theme: "auto" },
+        };
     }
 
     function normalize(parsed) {
         if (!parsed || !Array.isArray(parsed.plans)) return emptyDB();
-        parsed.seq = parsed.seq || { plan: 1, ex: 1, body: 1 };
+        parsed.seq = Object.assign({ plan: 1, ex: 1, body: 1, tpl: 1, meas: 1, cardio: 1 }, parsed.seq || {});
         parsed.bodies = parsed.bodies || [];
+        parsed.templates = parsed.templates || [];
+        parsed.measurements = parsed.measurements || [];
+        parsed.cardios = parsed.cardios || [];
+        parsed.trash = parsed.trash || [];
+        parsed.goals = Object.assign({ target_weight: null, weekly_sessions: null, target_date: null }, parsed.goals || {});
+        parsed.meta = Object.assign({ last_export_at: null, theme: "auto" }, parsed.meta || {});
+        parsed.templates.forEach((t) => {
+            t.exercises = (t.exercises || []).map((e) => ({
+                name: e.name,
+                sets: Number(e.sets) || 3,
+                reps: Number(e.reps) || 10,
+                weight: Number(e.weight) || 0,
+                rest_seconds: Number(e.rest_seconds) || 90,
+            }));
+        });
         parsed.plans.forEach((p) => {
             p.exercises = p.exercises || [];
             p.body_parts = p.body_parts || [];
@@ -163,8 +189,23 @@
     /* ---- 数据读写（按账号分键） ---- */
     function normalize(parsed) {
         if (!parsed || !Array.isArray(parsed.plans)) return emptyDB();
-        parsed.seq = parsed.seq || { plan: 1, ex: 1, body: 1 };
+        parsed.seq = Object.assign({ plan: 1, ex: 1, body: 1, tpl: 1, meas: 1, cardio: 1 }, parsed.seq || {});
         parsed.bodies = parsed.bodies || [];
+        parsed.templates = parsed.templates || [];
+        parsed.measurements = parsed.measurements || [];
+        parsed.cardios = parsed.cardios || [];
+        parsed.trash = parsed.trash || [];
+        parsed.goals = Object.assign({ target_weight: null, weekly_sessions: null, target_date: null }, parsed.goals || {});
+        parsed.meta = Object.assign({ last_export_at: null, theme: "auto" }, parsed.meta || {});
+        parsed.templates.forEach((t) => {
+            t.exercises = (t.exercises || []).map((e) => ({
+                name: e.name,
+                sets: Number(e.sets) || 3,
+                reps: Number(e.reps) || 10,
+                weight: Number(e.weight) || 0,
+                rest_seconds: Number(e.rest_seconds) || 90,
+            }));
+        });
         parsed.plans.forEach((p) => {
             p.exercises = p.exercises || [];
             p.body_parts = p.body_parts || [];
@@ -179,7 +220,18 @@
     }
 
     function emptyDB() {
-        return { version: 1, seq: { plan: 1, ex: 1, body: 1 }, plans: [], bodies: [] };
+        return {
+            version: 2,
+            seq: { plan: 1, ex: 1, body: 1, tpl: 1, meas: 1, cardio: 1 },
+            plans: [],
+            bodies: [],
+            templates: [],
+            goals: { target_weight: null, weekly_sessions: null, target_date: null },
+            measurements: [],
+            cardios: [],
+            trash: [],
+            meta: { last_export_at: null, theme: "auto" },
+        };
     }
 
     function readJSON(key) {
@@ -228,6 +280,15 @@
         return id;
     }
 
+    /** 训练用时（分钟）：进入训练 → 打卡之间的时间，缺任一端返回 null。 */
+    function planDuration(plan) {
+        if (!plan.started_at || !plan.completed_at) return null;
+        const start = new Date(plan.started_at.replace(" ", "T"));
+        const end = new Date(plan.completed_at.replace(" ", "T"));
+        const mins = Math.round((end - start) / 60000);
+        return mins > 0 ? mins : 0;
+    }
+
     /* ---------------- 组出参（对齐 PlanOut） ---------------- */
     function planOut(plan) {
         const exercises = plan.exercises
@@ -267,6 +328,8 @@
             note: plan.note,
             status: plan.status,
             completed_at: plan.completed_at,
+            started_at: plan.started_at || null,
+            duration_min: planDuration(plan),
             exercises,
             exercise_count: exercises.length,
             total_sets: exercises.reduce((s, e) => s + e.sets, 0),
@@ -491,8 +554,45 @@
     route("DELETE", "/api/plans/:id", (q, p) => {
         const plan = findPlan(p.id);
         db.plans = db.plans.filter((x) => x !== plan);
+        // 软删除：先进回收站，30 天后再彻底清掉，前端可「撤销」
+        db.trash.push(Object.assign({}, plan, { deleted_at: nowLocal() }));
+        purgeTrash();
         save();
-        return null;
+        return { trashed: true, id: plan.id, name: plan.title || plan.body_parts.join("+") };
+    });
+
+    route("POST", "/api/plans/:id/restore", (q, p) => {
+        const idx = db.trash.findIndex((x) => String(x.id) === String(p.id));
+        if (idx < 0) throw new HttpError(404, "回收站里没有这个计划");
+        const plan = db.trash.splice(idx, 1)[0];
+        delete plan.deleted_at;
+        db.plans.push(plan);
+        save();
+        return planOut(plan);
+    });
+
+    route("GET", "/api/trash", () => {
+        purgeTrash();
+        return db.trash
+            .slice()
+            .sort((a, b) => (a.deleted_at < b.deleted_at ? 1 : -1))
+            .map((x) => ({
+                id: x.id,
+                plan_date: x.plan_date,
+                title: x.title,
+                body_parts: x.body_parts.slice(),
+                exercise_count: x.exercises.length,
+                deleted_at: x.deleted_at,
+            }));
+    });
+
+    route("POST", "/api/plans/:id/start", (q, p) => {
+        const plan = findPlan(p.id);
+        if (!plan.started_at) {
+            plan.started_at = nowLocal();
+            save();
+        }
+        return planOut(plan);
     });
 
     route("POST", "/api/plans/:id/copy", (q, p) => {
@@ -695,6 +795,9 @@
 
     route("GET", "/api/stats", () => {
         const donePlans = db.plans.filter((p) => p.status === "done");
+        const durations = donePlans.map(planDuration).filter((v) => v !== null && v > 0);
+        const streak = streakInfo();
+        const mw = latestMeasurement();
         const week = weekStart(todayISO());
         let totalSets = 0;
         let totalVolume = 0;
@@ -716,8 +819,301 @@
             total_volume: r2(totalVolume),
             latest_weight: latest ? latest.weight : null,
             body_part_dist: distSorted,
+            // ---- 以下为扩展字段 ----
+            streak_current: streak.current,
+            streak_best: streak.best,
+            avg_duration: durations.length ? Math.round(durations.reduce((a, b) => a + b, 0) / durations.length) : null,
+            goals: db.goals,
+            weekly_target: db.goals.weekly_sessions || null,
+            latest_measurement: mw,
+            last_export_at: db.meta.last_export_at || null,
+            cardio_minutes: db.cardios.reduce((sum, c) => sum + (Number(c.minutes) || 0), 0),
         };
     });
+
+    /* ---- 连续打卡 / 热力图 ---- */
+    function streakInfo() {
+        const days = new Set(db.plans.filter((p) => p.status === "done").map((p) => p.plan_date));
+        const today = todayISO();
+        const yesterday = addDays(today, -1);
+        let current = 0;
+        if (days.has(today) || days.has(yesterday)) {
+            let cursor = days.has(today) ? today : yesterday;
+            while (days.has(cursor)) {
+                current += 1;
+                cursor = addDays(cursor, -1);
+            }
+        }
+        const sorted = Array.from(days).sort();
+        let best = 0;
+        let run = 0;
+        let prev = null;
+        sorted.forEach((d) => {
+            run = prev && addDays(prev, 1) === d ? run + 1 : 1;
+            best = Math.max(best, run);
+            prev = d;
+        });
+        return { current, best, days: sorted };
+    }
+
+    route("GET", "/api/streak", () => {
+        const info = streakInfo();
+        const today = todayISO();
+        const start = addDays(today, -118);
+        const heat = [];
+        const doneByDay = new Map();
+        db.plans
+            .filter((p) => p.status === "done" && p.plan_date >= start)
+            .forEach((p) => {
+                const item = doneByDay.get(p.plan_date) || { sessions: 0, volume: 0 };
+                const out = planOut(p);
+                item.sessions += 1;
+                item.volume = r2(item.volume + (out.actual_volume || out.total_volume));
+                doneByDay.set(p.plan_date, item);
+            });
+        for (let i = 0; i < 119; i += 1) {
+            const d = addDays(start, i);
+            const item = doneByDay.get(d) || { sessions: 0, volume: 0 };
+            heat.push({ date: d, sessions: item.sessions, volume: item.volume });
+        }
+        return { current: info.current, best: info.best, days: heat };
+    });
+
+    /* ---- 某个动作最近一次的表现（训练页「上次」提示） ---- */
+    route("GET", "/api/last-performance", (q) => {
+        const name = String(q.name || "").trim();
+        if (!name) throw new HttpError(422, "请提供动作名称");
+        const done = db.plans
+            .filter((p) => p.status === "done")
+            .sort((a, b) => (a.plan_date === b.plan_date ? b.id - a.id : a.plan_date < b.plan_date ? 1 : -1));
+        for (const plan of done) {
+            const ex = plan.exercises.find((e) => e.name === name && !e.skipped);
+            if (!ex) continue;
+            const logs = ex.logs.filter((s) => s.done).sort((a, b) => a.set_index - b.set_index);
+            const sets = logs.length
+                ? logs.map((l) => ({ reps: l.reps, weight: l.weight, rpe: l.rpe }))
+                : Array.from({ length: ex.sets }, () => ({ reps: ex.reps, weight: ex.weight, rpe: null }));
+            return {
+                name,
+                plan_date: plan.plan_date,
+                max_weight: sets.reduce((mx, s) => Math.max(mx, Number(s.weight) || 0), 0),
+                sets,
+                volume: r2(sets.reduce((sum, s) => sum + (s.reps || 0) * (s.weight || 0), 0)),
+            };
+        }
+        return { name, plan_date: null, max_weight: 0, sets: [], volume: 0 };
+    });
+
+    /* ---- 训练模板 ---- */
+    route("GET", "/api/templates", () =>
+        db.templates
+            .slice()
+            .sort((a, b) => (a.created_at < b.created_at ? 1 : -1))
+            .map((t) => ({ ...t, exercise_count: t.exercises.length }))
+    );
+
+    route("POST", "/api/templates", (q, p, body) => {
+        // 两种来源：直接传动作数组，或传 plan_id 把某个计划存成模板
+        let source = null;
+        if (body.plan_id) source = planOut(findPlan(body.plan_id));
+        const name = String(body.name || (source ? source.title || source.body_parts.join("+") : "") || "未命名模板").trim().slice(0, 50);
+        const parts = source ? source.body_parts.slice() : (body.body_parts || []).slice();
+        const exercises = source
+            ? source.exercises.map((e) => ({
+                  name: e.name,
+                  sets: e.sets,
+                  reps: e.reps,
+                  weight: e.weight,
+                  rest_seconds: e.rest_seconds,
+              }))
+            : (body.exercises || []).map((e) => {
+                  const c = checkExercise(e);
+                  return { name: c.name, sets: c.sets, reps: c.reps, weight: c.weight, rest_seconds: c.rest_seconds };
+              });
+        if (!exercises.length) throw new HttpError(422, "模板里至少要有一个动作");
+        if (db.templates.some((t) => t.name === name)) throw new HttpError(409, "已有同名模板，换个名字");
+        const tpl = {
+            id: nextId("tpl"),
+            name,
+            body_parts: parts.length ? parts : ["其他"],
+            note: String(body.note || "").trim(),
+            exercises,
+            created_at: nowLocal(),
+        };
+        db.templates.push(tpl);
+        save();
+        return { ...tpl, exercise_count: exercises.length };
+    });
+
+    route("DELETE", "/api/templates/:id", (q, p) => {
+        const before = db.templates.length;
+        db.templates = db.templates.filter((t) => String(t.id) !== String(p.id));
+        if (db.templates.length === before) throw new HttpError(404, "模板不存在");
+        save();
+        return null;
+    });
+
+    route("POST", "/api/templates/:id/apply", (q, p, body) => {
+        const tpl = db.templates.find((t) => String(t.id) === String(p.id));
+        if (!tpl) throw new HttpError(404, "模板不存在");
+        const plan = {
+            id: nextId("plan"),
+            plan_date: body.plan_date || todayISO(),
+            body_parts: tpl.body_parts.slice(),
+            title: tpl.name,
+            note: tpl.note,
+            status: "planned",
+            completed_at: null,
+            started_at: null,
+            created_at: nowLocal(),
+            exercises: tpl.exercises.map((e, idx) => ({
+                id: nextId("ex"),
+                name: e.name,
+                sets: e.sets,
+                reps: e.reps,
+                weight: e.weight,
+                rest_seconds: e.rest_seconds,
+                note: "",
+                sort_order: idx,
+                skipped: false,
+                logs: [],
+            })),
+        };
+        db.plans.push(plan);
+        save();
+        return planOut(plan);
+    });
+
+    /* ---- 界面偏好（主题） ---- */
+    route("GET", "/api/meta", () => db.meta);
+
+    route("PATCH", "/api/meta", (q, p, body) => {
+        if (body.theme !== undefined) {
+            const theme = String(body.theme);
+            if (!["auto", "light", "dark"].includes(theme)) throw new HttpError(422, "主题取值只能是 auto/light/dark");
+            db.meta.theme = theme;
+            save();
+        }
+        return db.meta;
+    });
+
+    /* ---- 目标 ---- */
+    route("GET", "/api/goals", () => db.goals);
+
+    route("PATCH", "/api/goals", (q, p, body) => {
+        if (body.target_weight !== undefined) {
+            db.goals.target_weight = body.target_weight === null || body.target_weight === "" ? null : Number(body.target_weight);
+            if (db.goals.target_weight !== null && (db.goals.target_weight < 20 || db.goals.target_weight > 500)) {
+                throw new HttpError(422, "目标体重需在 20–500 kg 之间");
+            }
+        }
+        if (body.weekly_sessions !== undefined) {
+            db.goals.weekly_sessions = body.weekly_sessions === null || body.weekly_sessions === "" ? null : Number(body.weekly_sessions);
+            if (db.goals.weekly_sessions !== null && (db.goals.weekly_sessions < 1 || db.goals.weekly_sessions > 21)) {
+                throw new HttpError(422, "每周目标次数需在 1–21 之间");
+            }
+        }
+        if (body.target_date !== undefined) db.goals.target_date = body.target_date || null;
+        save();
+        return db.goals;
+    });
+
+    /* ---- 围度 ---- */
+    function latestMeasurement() {
+        const list = db.measurements.slice().sort((a, b) => (a.date === b.date ? b.id - a.id : a.date < b.date ? 1 : -1));
+        return list[0] || null;
+    }
+
+    route("GET", "/api/measurements", () =>
+        db.measurements
+            .slice()
+            .sort((a, b) => (a.date === b.date ? b.id - a.id : a.date < b.date ? 1 : -1))
+            .slice(0, 200)
+            .map((m) => ({ ...m }))
+    );
+
+    route("POST", "/api/measurements", (q, p, body) => {
+        const fields = ["chest", "waist", "arm", "thigh"];
+        const record = { id: nextId("meas"), date: body.date || todayISO() };
+        let any = false;
+        fields.forEach((f) => {
+            const raw = body[f];
+            if (raw === undefined || raw === null || raw === "") {
+                record[f] = null;
+                return;
+            }
+            const v = Number(raw);
+            if (!Number.isFinite(v) || v < 10 || v > 200) throw new HttpError(422, "围度需在 10–200 cm 之间");
+            record[f] = v;
+            any = true;
+        });
+        if (!any) throw new HttpError(422, "至少填写一个围度");
+        record.note = String(body.note || "").trim();
+        record.created_at = nowLocal();
+        db.measurements.push(record);
+        save();
+        return { ...record };
+    });
+
+    route("DELETE", "/api/measurements/:id", (q, p) => {
+        const before = db.measurements.length;
+        db.measurements = db.measurements.filter((m) => String(m.id) !== String(p.id));
+        if (db.measurements.length === before) throw new HttpError(404, "记录不存在");
+        save();
+        return null;
+    });
+
+    /* ---- 有氧 ---- */
+    route("GET", "/api/cardios", () =>
+        db.cardios
+            .slice()
+            .sort((a, b) => (a.date === b.date ? b.id - a.id : a.date < b.date ? 1 : -1))
+            .slice(0, 200)
+            .map((c) => ({ ...c }))
+    );
+
+    route("POST", "/api/cardios", (q, p, body) => {
+        const type = String(body.type || "跑步").trim().slice(0, 10);
+        const minutes = Number(body.minutes);
+        if (!Number.isFinite(minutes) || minutes < 1 || minutes > 600) throw new HttpError(422, "时长需在 1–600 分钟之间");
+        let distance = null;
+        if (body.distance_km !== undefined && body.distance_km !== null && body.distance_km !== "") {
+            distance = Number(body.distance_km);
+            if (!Number.isFinite(distance) || distance < 0 || distance > 200) throw new HttpError(422, "距离需在 0–200 km 之间");
+        }
+        let hr = null;
+        if (body.avg_hr !== undefined && body.avg_hr !== null && body.avg_hr !== "") {
+            hr = Number(body.avg_hr);
+            if (!Number.isFinite(hr) || hr < 40 || hr > 220) throw new HttpError(422, "平均心率需在 40–220 之间");
+        }
+        const record = {
+            id: nextId("cardio"),
+            date: body.date || todayISO(),
+            type,
+            minutes,
+            distance_km: distance,
+            avg_hr: hr,
+            note: String(body.note || "").trim(),
+            created_at: nowLocal(),
+        };
+        db.cardios.push(record);
+        save();
+        return { ...record };
+    });
+
+    route("DELETE", "/api/cardios/:id", (q, p) => {
+        const before = db.cardios.length;
+        db.cardios = db.cardios.filter((c) => String(c.id) !== String(p.id));
+        if (db.cardios.length === before) throw new HttpError(404, "记录不存在");
+        save();
+        return null;
+    });
+
+    /* ---- 回收站清理：只保留 30 天 ---- */
+    function purgeTrash() {
+        const cutoff = addDays(todayISO(), -30);
+        db.trash = db.trash.filter((x) => (x.deleted_at || "").slice(0, 10) >= cutoff);
+    }
 
     /* ---- 动作进步 ---- */
     route("GET", "/api/progress/exercise-names", () => {
@@ -913,6 +1309,8 @@
     /* ---------------- 备份 / 导入 / 清空 ---------------- */
     function exportBlob() {
         requireSession();
+        db.meta.last_export_at = nowLocal();
+        save();
         const payload = {
             app: "健身记录·静态版",
             version: db.version || 1,

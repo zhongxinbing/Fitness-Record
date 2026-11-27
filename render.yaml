@@ -12,6 +12,13 @@ services:
       - path: /assets/*
         name: Cache-Control
         value: public, max-age=3600
+      # Service Worker 和清单文件不要缓存，否则改了代码用户拿不到新版本
+      - path: /sw.js
+        name: Cache-Control
+        value: no-cache
+      - path: /manifest.webmanifest
+        name: Cache-Control
+        value: no-cache
 #
 # 说明：整站只有一个 index.html，没有前端路由，因此不需要写 SPA 的 rewrite 规则。
 # 加 rewrite /* → /index.html 反而可能把 assets/*.js 请求也重定向，导致白屏。

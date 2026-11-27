@@ -1,0 +1,17 @@
+{
+  "name": "健身记录 · Fitness Record",
+  "short_name": "健身记录",
+  "description": "记录每天的训练计划、组次重量、体重围度与有氧，纯本地保存，离线也能用。",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#0f1420",
+  "theme_color": "#1d4ed8",
+  "lang": "zh-CN",
+  "icons": [
+    { "src": "assets/icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "assets/icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "assets/icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}

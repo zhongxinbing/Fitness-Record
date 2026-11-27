@@ -1141,3 +1141,169 @@ body {
     line-height: 1.6;
     color: #9aa3b2;
 }
+
+/* ================= 深色主题 ================= */
+html[data-theme="dark"] {
+    --bg: #0f1420;
+    --card: #1a2030;
+    --text: #e7ecf5;
+    --text-sub: #98a2b3;
+    --line: #2a3346;
+    --line-soft: #232b3c;
+    --primary-soft: #1e2a45;
+    --shadow: 0 2px 12px rgba(0, 0, 0, 0.35);
+}
+html[data-theme="dark"] body { background: var(--bg); color: var(--text); }
+html[data-theme="dark"] .tab-bar { background: var(--card); }
+html[data-theme="dark"] .plan-card,
+html[data-theme="dark"] .day-card,
+html[data-theme="dark"] .sheet,
+html[data-theme="dark"] .ov-cell,
+html[data-theme="dark"] .week-card { background: var(--card); border-color: var(--line); }
+html[data-theme="dark"] .empty { color: var(--text-sub); }
+html[data-theme="dark"] .btn-sm { background: var(--card); border-color: var(--line); color: var(--text); }
+html[data-theme="dark"] .ghost-btn { background: var(--card); border-color: var(--line); color: var(--text); }
+html[data-theme="dark"] .ts-in,
+html[data-theme="dark"] .ts-rpe,
+html[data-theme="dark"] .field input,
+html[data-theme="dark"] .field select,
+html[data-theme="dark"] input,
+html[data-theme="dark"] select { background: #131a27; color: var(--text); border-color: var(--line); }
+html[data-theme="dark"] .te-card { background: var(--card); border-color: var(--line); }
+html[data-theme="dark"] .auth-card { background: var(--card); }
+html[data-theme="dark"] .auth-view { background: var(--bg); }
+html[data-theme="dark"] .btn-close { color: var(--text-sub); }
+
+/* ================= 备份提醒条 / 撤销条 ================= */
+.backup-tip {
+    display: flex; align-items: center; gap: 8px;
+    margin: 10px 12px 0; padding: 10px 12px;
+    background: #fff7ed; border: 1px solid #fed7aa; border-radius: 12px;
+    color: #92400e; font-size: 12.5px; line-height: 1.4;
+}
+.backup-tip .bt-text { flex: 1; }
+.backup-tip .bt-btn {
+    flex-shrink: 0; border: 0; background: #f59e0b; color: #fff;
+    padding: 5px 10px; border-radius: 9px; font-size: 12px;
+}
+.backup-tip .bt-x {
+    flex-shrink: 0; border: 0; background: transparent; color: #92400e; font-size: 14px; padding: 0 2px;
+}
+html[data-theme="dark"] .backup-tip { background: #2a2317; border-color: #6b4d16; color: #fbbf24; }
+
+.undo-bar {
+    position: fixed; left: 50%; transform: translateX(-50%);
+    bottom: calc(24px + env(safe-area-inset-bottom));
+    display: flex; align-items: center; gap: 14px;
+    padding: 10px 16px; border-radius: 999px;
+    background: rgba(23, 31, 46, 0.94); color: #fff;
+    font-size: 13.5px; z-index: 90; box-shadow: 0 6px 20px rgba(0, 0, 0, 0.25);
+    max-width: 92vw;
+}
+.undo-bar .undo-btn {
+    border: 0; background: transparent; color: #93c5fd; font-size: 13.5px; font-weight: 600;
+}
+
+/* ================= 打卡日历（热力图） ================= */
+.heat-wrap { background: var(--card); border-radius: 16px; padding: 14px; box-shadow: var(--shadow); }
+.heat-grid { display: grid; grid-template-columns: repeat(17, 1fr); gap: 4px; }
+.heat-cell { aspect-ratio: 1 / 1; border-radius: 4px; background: var(--line-soft); }
+.heat-cell.l1 { background: #dbeafe; }
+.heat-cell.l2 { background: #93c5fd; }
+.heat-cell.l3 { background: #3b82f6; }
+.heat-cell.l4 { background: #1d4ed8; }
+.heat-cell.today { outline: 2px solid var(--primary); outline-offset: 1px; }
+.heat-legend { display: flex; align-items: center; justify-content: flex-end; gap: 5px; margin-top: 10px; font-size: 11px; color: var(--text-sub); }
+.heat-legend .heat-cell { width: 12px; aspect-ratio: 1 / 1; }
+html[data-theme="dark"] .heat-cell.l1 { background: #1e3a8a; }
+html[data-theme="dark"] .heat-cell.l2 { background: #2563eb; }
+html[data-theme="dark"] .heat-cell.l3 { background: #3b82f6; }
+html[data-theme="dark"] .heat-cell.l4 { background: #60a5fa; }
+
+/* ================= 目标进度 ================= */
+.goal-line { margin-top: 10px; }
+.goal-line .gl-head { display: flex; justify-content: space-between; font-size: 12.5px; color: var(--text-sub); }
+.goal-bar { height: 6px; border-radius: 999px; background: var(--line-soft); margin-top: 5px; overflow: hidden; }
+.goal-bar > i { display: block; height: 100%; background: var(--primary); border-radius: 999px; }
+.goal-bar.warn > i { background: #f59e0b; }
+
+/* ================= 围度 / 有氧列表 ================= */
+.meas-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-top: 10px; }
+.meas-cell { background: var(--card); border-radius: 12px; padding: 10px; text-align: center; box-shadow: var(--shadow); }
+.meas-cell .mc-v { font-size: 18px; font-weight: 700; }
+.meas-cell .mc-k { font-size: 11px; color: var(--text-sub); margin-top: 2px; }
+.meas-cell .mc-d { font-size: 10.5px; margin-top: 4px; }
+.meas-delta.up { color: var(--danger); }
+.meas-delta.down { color: var(--accent); }
+.rec-list { margin-top: 10px; }
+.rec-item {
+    display: flex; align-items: center; gap: 8px;
+    background: var(--card); border-radius: 12px; padding: 10px 12px; margin-bottom: 8px;
+    box-shadow: var(--shadow); font-size: 13px;
+}
+.rec-item .rec-main { flex: 1; min-width: 0; }
+.rec-item .rec-title { font-weight: 600; }
+.rec-item .rec-sub { font-size: 11.5px; color: var(--text-sub); margin-top: 2px; }
+.rec-item .rec-x { border: 0; background: transparent; color: var(--text-sub); font-size: 14px; padding: 2px 4px; }
+
+/* ================= 模板列表 ================= */
+.tpl-item {
+    background: var(--card); border-radius: 12px; padding: 12px; margin-bottom: 10px;
+    box-shadow: var(--shadow);
+}
+.tpl-item .tpl-title { font-weight: 600; font-size: 14.5px; }
+.tpl-item .tpl-sub { font-size: 11.5px; color: var(--text-sub); margin-top: 3px; }
+.tpl-item .tpl-actions { display: flex; gap: 8px; margin-top: 10px; }
+.tpl-item .tpl-actions button { flex: 1; }
+.tpl-empty { font-size: 13px; color: var(--text-sub); padding: 14px 4px; }
+
+/* ================= 训练页「上次」 ================= */
+.te-last { font-size: 11.5px; color: var(--text-sub); margin: 4px 0 0; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.te-last .tl-apply {
+    border: 1px solid var(--line); background: var(--card); color: var(--primary);
+    font-size: 11px; padding: 2px 8px; border-radius: 8px;
+}
+
+/* ================= 动作搜索 ================= */
+.prog-search {
+    width: 100%; padding: 9px 12px; border-radius: 10px; border: 1px solid var(--line);
+    background: var(--card); color: var(--text); font-size: 13px; margin-bottom: 10px;
+}
+
+/* 修正：flex 组件上 hidden 失效 */
+.backup-tip[hidden] { display: none; }
+.undo-bar[hidden] { display: none; }
+
+/* 概览卡（深色底）里的目标进度用浅色文字 */
+#overview .goal-line .gl-head { color: #cbd5e1; }
+#overview .goal-bar { background: rgba(255, 255, 255, 0.14); }
+#overview .goal-bar > i { background: #60a5fa; }
+
+/* 热力图头部两端留白 */
+.heat-wrap .gl-head { gap: 12px; }
+.heat-wrap .gl-head b { font-size: 15px; }
+
+/* 热力图头部：两端对齐 */
+.heat-wrap .gl-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    font-size: 13px;
+    color: var(--text-sub);
+}
+.heat-wrap .gl-head b { color: var(--text); font-size: 16px; }
+
+/* 暗色：图表与小控件 */
+html[data-theme="dark"] .chart-wrap { background: #131a27; border-color: var(--line); }
+html[data-theme="dark"] .chip-btn,
+html[data-theme="dark"] .card-icon-btn,
+html[data-theme="dark"] .head-pick,
+html[data-theme="dark"] .timer-presets button,
+html[data-theme="dark"] .ts-check,
+html[data-theme="dark"] .te-act,
+html[data-theme="dark"] .ts-rpe { background: #131a27; color: var(--text-sub); border-color: var(--line); }
+html[data-theme="dark"] .chip-btn.active,
+html[data-theme="dark"] .ts-check.on { background: var(--primary); color: #fff; border-color: var(--primary); }
+html[data-theme="dark"] .pl-list,
+html[data-theme="dark"] .hist-day,
+html[data-theme="dark"] .prog-item { background: var(--card); }

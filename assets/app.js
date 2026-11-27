@@ -262,7 +262,7 @@ function planCard(plan, mode) {
            </div>
            <div class="quick-add" data-qa="${plan.id}">
              <div class="qa-grid">
-               <div class="field span-2"><label>动作名称</label><input type="text" class="qa-name" maxlength="50" placeholder="如 绳索下压"></div>
+               <div class="field span-2"><label>动作名称</label><input type="text" class="qa-name" maxlength="50" list="ex-name-list" autocomplete="off" placeholder="如 绳索下压"></div>
                <div class="field"><label>组数</label><input type="number" class="qa-sets" min="1" max="99" placeholder="3"></div>
                <div class="field"><label>次数</label><input type="number" class="qa-reps" min="1" max="999" placeholder="12"></div>
                <div class="field"><label>重量 (kg)</label><input type="number" class="qa-weight" min="0" max="1000" step="0.5" placeholder="20"></div>
@@ -309,6 +309,7 @@ async function loadPlanTab() {
 
     $("#other-wrap").style.display = others.length ? "" : "none";
     $("#other-plans").innerHTML = others.map((p) => planCard(p, "plan")).join("");
+    fillNameList().catch(() => {});
 }
 
 /* ---------------- 从历史选择计划 ---------------- */
@@ -397,6 +398,10 @@ async function loadHistory() {
     loadBodyPanel().catch(() => {});
     loadWeekly().catch(() => {});
 
+    loadHeat().catch(() => {});
+    loadMeas().catch(() => {});
+    loadCardio().catch(() => {});
+
     const partChips = Object.entries(stats.body_part_dist || {})
         .map(([p, n]) => `<span class="part-chip">${escapeHtml(p)} ${n}</span>`)
         .join("");
@@ -408,6 +413,7 @@ async function loadHistory() {
             <div class="ov-cell"><div class="ov-value">${stats.total_sets}</div><div class="ov-label">累计组数</div></div>
             <div class="ov-cell"><div class="ov-value">${num(stats.total_volume)}</div><div class="ov-label">累计容量 kg</div></div>
         </div>
+        ${goalLines(stats)}
         ${partChips ? `<div class="ov-line"></div><div class="ov-parts">${partChips}</div>` : ""}`;
 
     $("#history-count").textContent = days.length ? `${days.length} 天有记录` : "";
@@ -422,7 +428,7 @@ function dayCard(day) {
     const plans = day.plans.map((p) => `
         <div class="dc-plan">
             <div class="dc-plan-title">
-                ${p.title ? escapeHtml(p.title) : p.body_parts.join(" + ")} · ${p.exercise_count} 个动作 · ${p.total_sets} 组
+                ${p.title ? escapeHtml(p.title) : p.body_parts.join(" + ")} · ${p.exercise_count} 个动作 · ${p.total_sets} 组${p.duration_min !== null && p.duration_min !== undefined ? ` · 用时 ${p.duration_min > 0 ? p.duration_min + " 分" : "不到 1 分"}` : ""}
             </div>
             ${p.exercises.map((e) => `
                 <div class="dc-ex">
@@ -459,9 +465,10 @@ document.addEventListener("click", async (e) => {
             await api(`/api/plans/${pid}/reopen`, { method: "POST" });
             await refreshAll();
         } else if (action === "del-plan") {
-            if (!confirm("删除这个计划？")) return;
-            await api(`/api/plans/${pid}`, { method: "DELETE" });
+            if (!confirm("删除这个计划？删除后可在底部「撤销」，或者在备份弹层的回收站里找回。")) return;
+            const res = await api(`/api/plans/${pid}`, { method: "DELETE" });
             await refreshAll();
+            showUndo(`已删除「${(res && res.name) || "计划"}」`, (res && res.id) || pid);
         } else if (action === "del-ex") {
             if (!confirm("删除这个动作？")) return;
             await api(`/api/plans/${pid}/exercises/${btn.dataset.eid}`, { method: "DELETE" });
@@ -854,14 +861,17 @@ function trainSetCount(plan) {
 
 async function openTraining(pid) {
     try {
+        await api(`/api/plans/${pid}/start`, { method: "POST" }).catch(() => {});
         const plan = await api(`/api/plans/${pid}`);
         trainPlan = plan;
+        await loadLastPerf(plan);
         $("#train-title").textContent = plan.title || `${plan.body_parts.join("/")}训练`;
         trainMask.hidden = false;
         document.body.style.overflow = "hidden";
         renderTraining();
         clearInterval(trainTick);
         trainTick = setInterval(syncRestBanner, 300);
+        startElapsed(plan.started_at);
         const active = $("#train-body .te-card.is-active");
         if (active) setTimeout(() => active.scrollIntoView({ block: "start", behavior: "smooth" }), 60);
     } catch (err) {
@@ -916,6 +926,7 @@ function renderTraining() {
         <span class="te-count">${skipped ? "本次不做" : `${done.length}/${e.sets} 组`}</span>
       </div>
       <div class="te-sub">计划 ${e.reps} 次 × ${e.weight > 0 ? e.weight + " kg" : "自重"} · 休息 ${fmtRest(e.rest_seconds)}${rpeAvg}</div>
+      ${lastPerfLine(e)}
       <div class="te-actions">
         <button class="te-act" data-action="swap-ex" data-pid="${plan.id}" data-eid="${e.id}" data-name="${escapeHtml(e.name)}">↔ 替换</button>
         <button class="te-act warn" data-action="skip-ex" data-pid="${plan.id}" data-eid="${e.id}" data-skip="${skipped ? "0" : "1"}">${skipped ? "恢复这个动作" : "跳过这个动作"}</button>
@@ -1014,6 +1025,8 @@ function closeTraining() {
     trainPlan = null;
     clearInterval(trainTick);
     trainTick = null;
+    clearInterval(elapsedTick);
+    elapsedTick = null;
     $("#rest-banner").hidden = true;
     document.body.style.overflow = "";
     if (dirty) loadPlanTab().catch(() => {});
@@ -1249,7 +1262,8 @@ async function loadProgList() {
         }
         body.innerHTML = `
             <p class="hint mb-10">挑一个动作，看重量、容量和预估 1RM 的变化</p>
-            <div class="prog-list">
+            <input type="search" class="prog-search" id="prog-search" placeholder="搜索动作名" autocomplete="off">
+            <div class="prog-list" id="prog-list">
                 ${names.map((n) => `
                     <div class="prog-item" data-action="prog-open" data-name="${escapeHtml(n.name)}">
                         <span class="pi-name">${escapeHtml(n.name)}</span>
@@ -1257,6 +1271,14 @@ async function loadProgList() {
                         <span class="pi-arrow">›</span>
                     </div>`).join("")}
             </div>`;
+        const search = $("#prog-search");
+        search.addEventListener("input", () => {
+            const kw = search.value.trim().toLowerCase();
+            $$("#prog-list .prog-item").forEach((el) => {
+                const name = (el.dataset.name || "").toLowerCase();
+                el.style.display = !kw || name.includes(kw) ? "" : "none";
+            });
+        });
     } catch (err) {
         body.innerHTML = `<div class="chart-empty">${escapeHtml(err.message)}</div>`;
     }
@@ -1610,7 +1632,11 @@ function showApp(user) {
     $("#app-view").hidden = false;
     document.body.classList.remove("auth-mode");
     $("#user-name").textContent = user.username;
-    bootData();
+    bootData().then(() => {
+        initTheme().catch(() => {});
+        fillNameList().catch(() => {});
+        checkBackupTip().catch(() => {});
+    });
 }
 
 function setAuthMode(mode) {
@@ -1714,6 +1740,9 @@ function openBackup() {
     $("#backup-msg").className = "form-msg";
     $("#backup-msg").textContent = "";
     $("#backup-file").value = "";
+    loadTrash().catch(() => {});
+    const sel = $("#theme-select");
+    if (sel) sel.value = themePref;
     backupMask.hidden = false;
     document.body.style.overflow = "hidden";
 }
@@ -1740,6 +1769,8 @@ $("#backup-export").addEventListener("click", () => {
     const msg = $("#backup-msg");
     msg.className = "form-msg ok";
     msg.textContent = "已导出，文件在浏览器的下载目录";
+    $("#backup-tip").hidden = true;
+    checkBackupTip().catch(() => {});
 });
 
 $("#backup-import").addEventListener("click", async () => {
@@ -1771,3 +1802,575 @@ $("#backup-clear").addEventListener("click", () => {
     refreshAll();
     toast("已清空当前账号数据");
 });
+
+/* =====================================================================
+   本轮新增功能：模板 / 打卡日历 / 目标 / 围度 / 有氧 /
+   上次表现 / 训练用时 / 撤销删除 / 备份提醒 / 深色模式 / 动作联想
+   ===================================================================== */
+
+/* ---------------- ① 通用弹层开关 ---------------- */
+function showMask(mask) {
+    if (!mask) return;
+    $("#undo-bar").hidden = true;   // 弹层打开时先收起撤销条，避免遮挡
+    mask.hidden = false;
+    document.body.style.overflow = "hidden";
+}
+function hideMask(mask) {
+    if (!mask) return;
+    mask.hidden = true;
+    const anyOpen = Array.prototype.some.call($$(".sheet-mask"), (m) => !m.hidden);
+    if (!anyOpen) document.body.style.overflow = "";
+}
+
+/* ---------------- ② 深色模式 ---------------- */
+const THEME_FALLBACK_KEY = "fitness_theme_v1";
+let themePref = "auto";
+
+function resolveTheme(pref) {
+    if (pref === "auto") {
+        return window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+    }
+    return pref === "dark" ? "dark" : "light";
+}
+function paintTheme(pref) {
+    document.documentElement.dataset.theme = resolveTheme(pref);
+}
+async function initTheme() {
+    try {
+        const meta = await api("/api/meta");
+        themePref = meta.theme || "auto";
+    } catch (err) {
+        themePref = localStorage.getItem(THEME_FALLBACK_KEY) || "auto";
+    }
+    paintTheme(themePref);
+    localStorage.setItem(THEME_FALLBACK_KEY, themePref);
+    const sel = $("#theme-select");
+    if (sel) sel.value = themePref;
+}
+if (window.matchMedia) {
+    const mq = window.matchMedia("(prefers-color-scheme: dark)");
+    const onChange = () => { if (themePref === "auto") paintTheme("auto"); };
+    if (mq.addEventListener) mq.addEventListener("change", onChange);
+    else if (mq.addListener) mq.addListener(onChange);
+}
+document.documentElement.dataset.theme = resolveTheme(localStorage.getItem(THEME_FALLBACK_KEY) || "auto");
+
+$("#theme-select").addEventListener("change", async (e) => {
+    themePref = e.target.value;
+    paintTheme(themePref);
+    localStorage.setItem(THEME_FALLBACK_KEY, themePref);
+    try {
+        await api("/api/meta", { method: "PATCH", body: JSON.stringify({ theme: themePref }) });
+        toast("主题已保存");
+    } catch (err) {
+        toast(err.message);
+    }
+});
+
+/* ---------------- ③ 备份提醒条 ---------------- */
+async function checkBackupTip() {
+    const tip = $("#backup-tip");
+    if (!tip) return;
+    if (sessionStorage.getItem("backup_tip_closed") === "1") { tip.hidden = true; return; }
+    try {
+        const stats = await api("/api/stats");
+        const hasData = (stats.done_plans || 0) > 0 || (stats.total_plans || 0) > 0;
+        const last = stats.last_export_at;
+        let show = false;
+        let text = "还没有导出过备份，换设备或清缓存会把数据一起清掉";
+        if (hasData && last) {
+            const days = Math.floor((Date.now() - new Date(last.replace(" ", "T")).getTime()) / 86400000);
+            if (days >= 7) {
+                show = true;
+                text = `上次备份是 ${days} 天前，建议再导出一份`;
+            }
+        } else if (hasData) {
+            show = true;
+        }
+        tip.hidden = !show;
+        if (show) $("#backup-tip-text").textContent = text;
+    } catch (err) {
+        tip.hidden = true;
+    }
+}
+$("#backup-tip-close").addEventListener("click", () => {
+    $("#backup-tip").hidden = true;
+    sessionStorage.setItem("backup_tip_closed", "1");
+});
+
+/* ---------------- ④ 撤销删除 ---------------- */
+let undoState = null;
+let undoTimer = null;
+function showUndo(text, planId) {
+    const bar = $("#undo-bar");
+    $("#undo-text").textContent = text;
+    bar.hidden = false;
+    undoState = planId;
+    clearTimeout(undoTimer);
+    undoTimer = setTimeout(() => { bar.hidden = true; undoState = null; }, 8000);
+}
+$("#undo-btn").addEventListener("click", async () => {
+    if (!undoState) return;
+    const id = undoState;
+    undoState = null;
+    $("#undo-bar").hidden = true;
+    clearTimeout(undoTimer);
+    try {
+        await api(`/api/plans/${id}/restore`, { method: "POST" });
+        toast("已恢复");
+        await refreshAll();
+    } catch (err) {
+        toast(err.message);
+    }
+});
+
+/* ---------------- ⑤ 训练用时计时 ---------------- */
+let elapsedTick = null;
+function startElapsed(startISO) {
+    clearInterval(elapsedTick);
+    const base = startISO ? new Date(startISO.replace(" ", "T")).getTime() : Date.now();
+    const paint = () => {
+        const el = $("#train-elapsed");
+        if (!el) return;
+        if (trainMask.hidden) { clearInterval(elapsedTick); elapsedTick = null; return; }
+        const sec = Math.max(0, Math.floor((Date.now() - (Number.isNaN(base) ? Date.now() : base)) / 1000));
+        el.textContent = fmtClock(sec);
+    };
+    paint();
+    elapsedTick = setInterval(paint, 1000);
+}
+
+/* ---------------- ⑥ 上次表现 ---------------- */
+let lastPerf = {};
+async function loadLastPerf(plan) {
+    lastPerf = {};
+    const names = [...new Set((plan.exercises || []).map((e) => e.name))];
+    if (!names.length) return;
+    const results = await Promise.all(
+        names.map((n) => api(`/api/last-performance?name=${encodeURIComponent(n)}`).catch(() => null))
+    );
+    results.forEach((r, i) => {
+        if (r && r.plan_date) lastPerf[names[i]] = r;
+    });
+}
+function lastPerfLine(e) {
+    const lp = lastPerf[e.name];
+    if (!lp) return "";
+    const top = (lp.sets || []).slice().sort((a, b) => (b.weight || 0) - (a.weight || 0))[0] || {};
+    const mainSet = (lp.sets || [])[0] || {};
+    const main = mainSet.weight
+        ? `${num(mainSet.weight)}kg × ${mainSet.reps}`
+        : `${mainSet.reps || e.reps} 次（自重）`;
+    return `<div class="te-last">上次 ${shortDate(lp.plan_date)} · ${main} · ${(lp.sets || []).length} 组
+        <button type="button" class="tl-apply" data-action="apply-last" data-eid="${e.id}">套用上次</button></div>`;
+}
+async function applyLastPerf(btn) {
+    if (!trainPlan) return;
+    const eid = Number(btn.dataset.eid);
+    const ex = trainPlan.exercises.find((x) => x.id === eid);
+    const lp = ex && lastPerf[ex.name];
+    if (!lp || !(lp.sets || []).length) return toast("这个动作还没有历史记录");
+    const card = btn.closest(".te-card");
+    const doneCount = (ex.done_sets || []).length;
+    const sets = lp.sets;
+    card.querySelectorAll(".ts-row").forEach((row, i) => {
+        if (i < doneCount) return; // 已记录的组不动
+        const s = sets[Math.min(i, sets.length - 1)] || {};
+        const wIn = row.querySelector(".ts-w");
+        const rIn = row.querySelector(".ts-r");
+        if (wIn && s.weight !== undefined && s.weight !== null) wIn.value = s.weight;
+        if (rIn && s.reps !== undefined && s.reps !== null) rIn.value = s.reps;
+    });
+    toast(`已套用 ${shortDate(lp.plan_date)} 的重量和次数`);
+}
+
+/* ---------------- ⑦ 打卡日历 + 连续打卡 ---------------- */
+function heatLevel(v, max) {
+    if (!v) return "";
+    if (max <= 1) return "l2";
+    const ratio = v / max;
+    if (ratio > 0.75) return "l4";
+    if (ratio > 0.5) return "l3";
+    if (ratio > 0.25) return "l2";
+    return "l1";
+}
+async function loadHeat() {
+    const panel = $("#heat-panel");
+    if (!panel) return;
+    const data = await api("/api/streak");
+    const max = Math.max(1, ...data.days.map((d) => d.sessions || 0));
+    const cells = data.days.map((d) => {
+        const lvl = heatLevel(d.sessions, max);
+        const isToday = d.date === TODAY;
+        const tip = d.sessions
+            ? `${shortDate(d.date)} · ${d.sessions} 次 · ${num(d.volume)} kg`
+            : `${shortDate(d.date)} · 没训练`;
+        return `<div class="heat-cell ${lvl} ${isToday ? "today" : ""}" title="${tip}" aria-label="${tip}"></div>`;
+    }).join("");
+    $("#streak-text").textContent = data.current ? `连续 ${data.current} 天` : "";
+    panel.innerHTML = `
+        <div class="heat-wrap">
+            <div class="gl-head"><span>连续打卡 <b>${data.current}</b> 天</span><span>最长 ${data.best} 天</span></div>
+            <div class="heat-grid mt-10">${cells}</div>
+            <div class="heat-legend"><span>近 17 周</span><span class="heat-cell"></span><span class="heat-cell l1"></span><span class="heat-cell l2"></span><span class="heat-cell l3"></span><span class="heat-cell l4"></span><span>越多</span></div>
+        </div>`;
+}
+
+/* ---------------- ⑧ 目标 ---------------- */
+function goalLines(stats) {
+    const goals = stats.goals || {};
+    const rows = [];
+    if (goals.weekly_sessions) {
+        const done = stats.week_sessions || 0;
+        const target = goals.weekly_sessions;
+        const pct = Math.min(100, Math.round((done / target) * 100));
+        rows.push(`<div class="goal-line">
+            <div class="gl-head"><span>本周训练 ${done} / ${target} 次</span><span>${pct}%</span></div>
+            <div class="goal-bar ${pct < 50 ? "warn" : ""}"><i style="width:${pct}%"></i></div>
+        </div>`);
+    }
+    if (goals.target_weight && stats.latest_weight) {
+        const cur = Number(stats.latest_weight);
+        const target = Number(goals.target_weight);
+        const diff = Math.abs(cur - target);
+        const pct = Math.min(100, Math.round((1 - Math.min(1, diff / Math.max(1, Math.abs(target) * 0.2))) * 100));
+        rows.push(`<div class="goal-line">
+            <div class="gl-head"><span>体重 ${num(cur)} kg · 目标 ${num(target)} kg</span><span>还差 ${num(diff)} kg</span></div>
+            <div class="goal-bar"><i style="width:${pct}%"></i></div>
+        </div>`);
+    } else if (goals.target_weight) {
+        rows.push(`<div class="goal-line"><div class="gl-head"><span>目标体重 ${num(goals.target_weight)} kg</span><span>先记一次体重</span></div></div>`);
+    }
+    return rows.length ? `<div class="ov-line"></div>${rows.join("")}` : "";
+}
+
+const goalMask = $("#goal-mask");
+async function openGoalSheet() {
+    try {
+        const goals = await api("/api/goals");
+        $("#g-weekly").value = goals.weekly_sessions || "";
+        $("#g-weight").value = goals.target_weight || "";
+        $("#g-date").value = goals.target_date || "";
+        $("#g-msg").textContent = "";
+        $("#g-msg").className = "form-msg";
+        showMask(goalMask);
+    } catch (err) {
+        toast(err.message);
+    }
+}
+$("#goal-close").addEventListener("click", () => hideMask(goalMask));
+goalMask.addEventListener("click", (e) => { if (e.target === goalMask) hideMask(goalMask); });
+
+$("#goal-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const weekly = $("#g-weekly").value === "" ? null : Number($("#g-weekly").value);
+    const weight = $("#g-weight").value === "" ? null : Number($("#g-weight").value);
+    if (weekly !== null && (weekly < 1 || weekly > 21)) { $("#g-msg").textContent = "每周次数需在 1–21 之间"; return; }
+    if (weight !== null && (weight < 20 || weight > 500)) { $("#g-msg").textContent = "目标体重需在 20–500 kg 之间"; return; }
+    try {
+        await api("/api/goals", {
+            method: "PATCH",
+            body: JSON.stringify({ weekly_sessions: weekly, target_weight: weight, target_date: $("#g-date").value || null }),
+        });
+        hideMask(goalMask);
+        toast("目标已保存");
+        await loadHistory();
+    } catch (err) {
+        $("#g-msg").textContent = err.message;
+    }
+});
+
+/* ---------------- ⑨ 围度 ---------------- */
+const measMask = $("#meas-mask");
+function openMeasSheet() {
+    $("#m-date").value = TODAY;
+    ["#m-chest", "#m-waist", "#m-arm", "#m-thigh", "#m-note"].forEach((id) => { $(id).value = ""; });
+    $("#m-msg").textContent = "";
+    $("#m-msg").className = "form-msg";
+    showMask(measMask);
+}
+$("#meas-close").addEventListener("click", () => hideMask(measMask));
+measMask.addEventListener("click", (e) => { if (e.target === measMask) hideMask(measMask); });
+
+$("#meas-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const payload = { date: $("#m-date").value || TODAY, note: $("#m-note").value.trim() };
+    let any = false;
+    for (const [key, id] of [["chest", "#m-chest"], ["waist", "#m-waist"], ["arm", "#m-arm"], ["thigh", "#m-thigh"]]) {
+        const raw = $(id).value;
+        if (raw === "") { payload[key] = null; continue; }
+        const v = Number(raw);
+        if (v < 10 || v > 200) { $("#m-msg").textContent = "围度需在 10–200 cm 之间"; return; }
+        payload[key] = v;
+        any = true;
+    }
+    if (!any) { $("#m-msg").textContent = "至少填一项围度"; return; }
+    try {
+        await api("/api/measurements", { method: "POST", body: JSON.stringify(payload) });
+        hideMask(measMask);
+        toast("围度已记录");
+        await loadMeas();
+        await loadHistory();
+    } catch (err) {
+        $("#m-msg").textContent = err.message;
+    }
+});
+
+async function loadMeas() {
+    const panel = $("#meas-panel");
+    if (!panel) return;
+    const list = await api("/api/measurements");
+    if (!list.length) {
+        panel.innerHTML = `<div class="empty sm"><span class="empty-icon">📏</span>还没有围度记录<br>变化靠数字才看得清，每周量一次</div>`;
+        return;
+    }
+    const latest = list[0];
+    const prev = list[1];
+    const cells = [["chest", "胸围"], ["waist", "腰围"], ["arm", "臂围"], ["thigh", "腿围"]]
+        .filter(([k]) => latest[k])
+        .map(([k, label]) => {
+            let delta = "";
+            if (prev && prev[k]) {
+                const d = Number((latest[k] - prev[k]).toFixed(1));
+                if (d !== 0) delta = `<div class="mc-d meas-delta ${d > 0 ? "up" : "down"}">${d > 0 ? "+" : ""}${d} cm</div>`;
+            }
+            return `<div class="meas-cell"><div class="mc-v">${num(latest[k])}</div><div class="mc-k">${label} cm</div>${delta}</div>`;
+        }).join("");
+    panel.innerHTML = `
+        <div class="hint">最近一次 ${fmtDay(latest.date)}｜共 ${list.length} 次记录</div>
+        <div class="meas-grid">${cells}</div>
+        <div class="rec-list">${list.slice(0, 6).map((m) => `
+            <div class="rec-item">
+                <div class="rec-main">
+                    <div class="rec-title">${fmtDay(m.date)}</div>
+                    <div class="rec-sub">${["chest", "waist", "arm", "thigh"].filter((k) => m[k]).map((k) => `${({ chest: "胸", waist: "腰", arm: "臂", thigh: "腿" })[k]} ${num(m[k])}`).join(" · ")}${m.note ? " · " + escapeHtml(m.note) : ""}</div>
+                </div>
+                <button type="button" class="rec-x" data-action="del-meas" data-id="${m.id}" aria-label="删除这条围度">✕</button>
+            </div>`).join("")}
+        </div>`;
+}
+
+/* ---------------- ⑩ 有氧 ---------------- */
+const cardioMask = $("#cardio-mask");
+function openCardioSheet() {
+    $("#c-date").value = TODAY;
+    $("#c-type").value = "跑步";
+    ["#c-minutes", "#c-distance", "#c-hr", "#c-note"].forEach((id) => { $(id).value = ""; });
+    $("#c-msg").textContent = "";
+    $("#c-msg").className = "form-msg";
+    showMask(cardioMask);
+}
+$("#cardio-close").addEventListener("click", () => hideMask(cardioMask));
+cardioMask.addEventListener("click", (e) => { if (e.target === cardioMask) hideMask(cardioMask); });
+
+$("#cardio-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const minutes = Number($("#c-minutes").value);
+    if (!minutes || minutes < 1 || minutes > 600) { $("#c-msg").textContent = "时长需在 1–600 分钟之间"; return; }
+    const distRaw = $("#c-distance").value;
+    const hrRaw = $("#c-hr").value;
+    const payload = {
+        date: $("#c-date").value || TODAY,
+        type: $("#c-type").value,
+        minutes,
+        distance_km: distRaw === "" ? null : Number(distRaw),
+        avg_hr: hrRaw === "" ? null : Number(hrRaw),
+        note: $("#c-note").value.trim(),
+    };
+    if (payload.distance_km !== null && (payload.distance_km < 0 || payload.distance_km > 200)) {
+        $("#c-msg").textContent = "距离需在 0–200 km 之间"; return;
+    }
+    if (payload.avg_hr !== null && (payload.avg_hr < 40 || payload.avg_hr > 220)) {
+        $("#c-msg").textContent = "心率需在 40–220 之间"; return;
+    }
+    try {
+        await api("/api/cardios", { method: "POST", body: JSON.stringify(payload) });
+        hideMask(cardioMask);
+        toast("有氧已记录");
+        await loadCardio();
+        await loadHistory();
+    } catch (err) {
+        $("#c-msg").textContent = err.message;
+    }
+});
+
+async function loadCardio() {
+    const panel = $("#cardio-panel");
+    if (!panel) return;
+    const list = await api("/api/cardios");
+    if (!list.length) {
+        panel.innerHTML = `<div class="empty sm"><span class="empty-icon">🏃</span>还没有有氧记录<br>练完记一笔，热量缺口更清楚</div>`;
+        return;
+    }
+    const week = list.filter((c) => (c.date || "") >= weekStartISO(TODAY));
+    const weekMin = week.reduce((a, c) => a + (Number(c.minutes) || 0), 0);
+    panel.innerHTML = `
+        <div class="hint">本周 ${week.length} 次 · 共 ${weekMin} 分钟</div>
+        <div class="rec-list">${list.slice(0, 8).map((c) => `
+            <div class="rec-item">
+                <div class="rec-main">
+                    <div class="rec-title">${escapeHtml(c.type)} · ${c.minutes} 分钟</div>
+                    <div class="rec-sub">${shortDate(c.date)}${c.distance_km ? " · " + num(c.distance_km) + " km" : ""}${c.avg_hr ? " · 心率 " + c.avg_hr : ""}${c.note ? " · " + escapeHtml(c.note) : ""}</div>
+                </div>
+                <button type="button" class="rec-x" data-action="del-cardio" data-id="${c.id}" aria-label="删除这条有氧">✕</button>
+            </div>`).join("")}
+        </div>`;
+}
+function weekStartISO(iso) {
+    const d = new Date(iso + "T00:00:00");
+    const offset = (d.getDay() + 6) % 7;
+    d.setDate(d.getDate() - offset);
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+/* ---------------- ⑪ 训练模板 ---------------- */
+const tplMask = $("#tpl-mask");
+async function openTplSheet() {
+    $("#tpl-msg").textContent = "";
+    $("#tpl-msg").className = "form-msg";
+    showMask(tplMask);
+    await loadTplList();
+}
+async function loadTplList() {
+    const box = $("#tpl-list");
+    box.innerHTML = `<div class="tpl-empty">加载中…</div>`;
+    try {
+        const list = await api("/api/templates");
+        if (!list.length) {
+            box.innerHTML = `<div class="tpl-empty">还没有模板。先建好今天这份计划，点下面按钮存成模板，以后一键开练。</div>`;
+            return;
+        }
+        box.innerHTML = list.map((t) => `
+            <div class="tpl-item">
+                <div class="tpl-title">${escapeHtml(t.name)}</div>
+                <div class="tpl-sub">${t.body_parts.map(escapeHtml).join("/")} · ${t.exercise_count} 个动作 · ${t.exercises.reduce((a, e) => a + (e.sets || 0), 0)} 组</div>
+                <div class="tpl-sub">${t.exercises.slice(0, 4).map((e) => `${escapeHtml(e.name)} ${e.sets}×${e.reps}${e.weight ? " " + e.weight + "kg" : ""}`).join(" / ")}${t.exercises.length > 4 ? " …" : ""}</div>
+                <div class="tpl-actions">
+                    <button type="button" class="primary-btn" data-action="tpl-apply" data-id="${t.id}">开练</button>
+                    <button type="button" class="ghost-btn" data-action="tpl-del" data-id="${t.id}">删除</button>
+                </div>
+            </div>`).join("");
+    } catch (err) {
+        box.innerHTML = `<div class="tpl-empty">${escapeHtml(err.message)}</div>`;
+    }
+}
+$("#tpl-close").addEventListener("click", () => hideMask(tplMask));
+tplMask.addEventListener("click", (e) => { if (e.target === tplMask) hideMask(tplMask); });
+
+$("#tpl-save-today").addEventListener("click", async () => {
+    try {
+        const plans = await api(`/api/plans?plan_date=${TODAY}&status=planned`);
+        const source = plans.find((p) => p.exercise_count > 0) || plans[0];
+        if (!source) {
+            $("#tpl-msg").textContent = "今天还没有带动作的计划，先建一个再存模板";
+            return;
+        }
+        await api("/api/templates", { method: "POST", body: JSON.stringify({ plan_id: source.id }) });
+        $("#tpl-msg").textContent = "已存为模板";
+        $("#tpl-msg").className = "form-msg ok";
+        await loadTplList();
+    } catch (err) {
+        $("#tpl-msg").textContent = err.message;
+        $("#tpl-msg").className = "form-msg error";
+    }
+});
+
+/* ---------------- ⑫ 新动作的点击委托 ---------------- */
+document.addEventListener("click", async (e) => {
+    const btn = e.target.closest("[data-action]");
+    if (!btn) return;
+    const action = btn.dataset.action;
+    try {
+        if (action === "open-backup") {
+            $("#backup-mask").hidden = false;
+            document.body.style.overflow = "hidden";
+        } else if (action === "open-tpl") {
+            await openTplSheet();
+        } else if (action === "open-goal") {
+            await openGoalSheet();
+        } else if (action === "add-meas") {
+            openMeasSheet();
+        } else if (action === "add-cardio") {
+            openCardioSheet();
+        } else if (action === "apply-last") {
+            await applyLastPerf(btn);
+        } else if (action === "del-meas") {
+            if (!confirm("删除这条围度记录？")) return;
+            await api(`/api/measurements/${btn.dataset.id}`, { method: "DELETE" });
+            await loadMeas();
+        } else if (action === "del-cardio") {
+            if (!confirm("删除这条有氧记录？")) return;
+            await api(`/api/cardios/${btn.dataset.id}`, { method: "DELETE" });
+            await loadCardio();
+        } else if (action === "tpl-apply") {
+            btn.disabled = true;
+            const plan = await api(`/api/templates/${btn.dataset.id}/apply`, { method: "POST", body: JSON.stringify({ plan_date: TODAY }) });
+            hideMask(tplMask);
+            toast(`已生成今日计划：${plan.title} · ${plan.exercise_count} 个动作`);
+            $$(".tab-btn").forEach((b) => b.classList.toggle("active", b.dataset.tab === "plan"));
+            $$(".tab-panel").forEach((p) => p.classList.toggle("active", p.id === "tab-plan"));
+            await loadPlanTab();
+        } else if (action === "tpl-del") {
+            if (!confirm("删除这个模板？")) return;
+            await api(`/api/templates/${btn.dataset.id}`, { method: "DELETE" });
+            await loadTplList();
+        }
+    } catch (err) {
+        toast(err.message);
+        if (btn.dataset.action === "tpl-apply") btn.disabled = false;
+    }
+});
+
+/* ---------------- ⑬ 动作名联想（datalist） ---------------- */
+async function fillNameList() {
+    const dl = $("#ex-name-list");
+    if (!dl) return;
+    try {
+        const names = await api("/api/progress/exercise-names");
+        dl.innerHTML = names.map((n) => `<option value="${escapeHtml(n.name)}"></option>`).join("");
+    } catch (err) { /* 无历史时忽略 */ }
+}
+
+/* ---------------- ⑭ 启动 ---------------- */
+initTheme();
+setTimeout(() => { fillNameList().catch(() => {}); checkBackupTip().catch(() => {}); }, 1200);
+
+/* ---------------- ⑮ 回收站 ---------------- */
+async function loadTrash() {
+    const box = $("#trash-list");
+    if (!box) return;
+    const list = await api("/api/trash");
+    $("#trash-meta").textContent = list.length ? `${list.length} 项 · 保留 30 天` : "";
+    if (!list.length) {
+        box.innerHTML = `<div class="tpl-empty">回收站是空的。删除的计划会先放这里，30 天内可恢复。</div>`;
+        return;
+    }
+    box.innerHTML = list.map((t) => `
+        <div class="rec-item">
+            <div class="rec-main">
+                <div class="rec-title">${escapeHtml(t.title || (t.body_parts || []).join("+") || "未命名计划")}</div>
+                <div class="rec-sub">${shortDate(t.plan_date)} · ${(t.exercises || []).length} 个动作 · 删除于 ${shortDate((t.deleted_at || "").slice(0, 10))}</div>
+            </div>
+            <button type="button" class="rec-x" data-action="trash-restore" data-id="${t.id}" style="color:var(--primary)">恢复</button>
+        </div>`).join("");
+}
+
+document.addEventListener("click", async (e) => {
+    const btn = e.target.closest('[data-action="trash-restore"]');
+    if (!btn) return;
+    try {
+        await api(`/api/plans/${btn.dataset.id}/restore`, { method: "POST" });
+        toast("已恢复");
+        await loadTrash();
+        await refreshAll();
+    } catch (err) {
+        toast(err.message);
+    }
+});
+
+/* ---------------- ⑯ PWA 离线缓存 ---------------- */
+if ("serviceWorker" in navigator) {
+    window.addEventListener("load", () => {
+        navigator.serviceWorker.register("sw.js").catch(() => { /* 本地 file:// 或权限受限时忽略 */ });
+    });
+}

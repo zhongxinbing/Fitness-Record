@@ -2,6 +2,11 @@
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
+    <link rel="manifest" href="manifest.webmanifest">
+    <meta name="theme-color" content="#1d4ed8">
+    <link rel="apple-touch-icon" href="assets/icons/icon-192.png">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-title" content="健身记录">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
     <meta name="theme-color" content="#0f172a">
     <title>健身记录</title>
@@ -67,6 +72,12 @@
         </div>
     </header>
 
+    <div class="backup-tip" id="backup-tip" hidden>
+        <span class="bt-text" id="backup-tip-text">已经一段时间没导出了，建议备份一份</span>
+        <button type="button" class="bt-btn" data-action="open-backup">去备份</button>
+        <button type="button" class="bt-x" id="backup-tip-close" aria-label="关闭">✕</button>
+    </div>
+
     <nav class="tab-bar" role="tablist">
         <button class="tab-btn active" data-tab="plan" role="tab">今日计划</button>
         <button class="tab-btn" data-tab="history" role="tab">历史</button>
@@ -79,6 +90,7 @@
                 <span class="sec-title">今天要练</span>
                 <span class="sec-right">
                     <span class="sec-meta" id="today-count">0 个计划</span>
+                    <button type="button" class="head-pick" data-action="open-tpl">模板</button>
                     <button type="button" class="head-pick" data-action="pick-hist">从历史选</button>
                 </span>
             </div>
@@ -100,6 +112,15 @@
             <div id="week-panel"></div>
 
             <div class="sec-head mt-20">
+                <span class="sec-title">打卡日历</span>
+                <span class="sec-right">
+                    <span class="sec-meta" id="streak-text"></span>
+                    <button type="button" class="head-pick" data-action="open-goal">目标</button>
+                </span>
+            </div>
+            <div id="heat-panel"></div>
+
+            <div class="sec-head mt-20">
                 <span class="sec-title">训练历史</span>
                 <span class="sec-right">
                     <span class="sec-meta" id="history-count"></span>
@@ -113,6 +134,18 @@
                 <button type="button" class="head-pick" data-action="add-body">＋ 记录</button>
             </div>
             <div id="body-panel"></div>
+
+            <div class="sec-head mt-20">
+                <span class="sec-title">围度</span>
+                <button type="button" class="head-pick" data-action="add-meas">＋ 记录</button>
+            </div>
+            <div id="meas-panel"></div>
+
+            <div class="sec-head mt-20">
+                <span class="sec-title">有氧</span>
+                <button type="button" class="head-pick" data-action="add-cardio">＋ 记录</button>
+            </div>
+            <div id="cardio-panel"></div>
         </section>
     </main>
 
@@ -170,7 +203,7 @@
         <div class="train-head">
             <button type="button" class="tv-close" id="train-close" aria-label="退出训练">✕</button>
             <div class="tv-title" id="train-title">训练中</div>
-            <div class="tv-progress" id="train-progress">0 / 0 组</div>
+            <div class="tv-progress"><span id="train-progress">0 / 0 组</span> · <span id="train-elapsed">00:00</span></div>
         </div>
         <div class="rest-banner" id="rest-banner" hidden>
             <span class="rb-dot"></span>
@@ -195,7 +228,7 @@
                 <form id="ex-form" novalidate>
                     <div class="field">
                         <label for="ex-name">动作名称</label>
-                        <input type="text" id="ex-name" maxlength="50" placeholder="如 杠铃卧推">
+                        <input type="text" id="ex-name" maxlength="50" list="ex-name-list" autocomplete="off" placeholder="如 杠铃卧推">
                     </div>
                     <div class="ex-edit-grid mt-12">
                         <div class="field">
@@ -358,7 +391,7 @@
             <div class="er-grid">
                 <div class="field span-2">
                     <label>动作名称</label>
-                    <input type="text" class="ex-name" maxlength="50" placeholder="如 杠铃卧推">
+                    <input type="text" class="ex-name" maxlength="50" list="ex-name-list" autocomplete="off" placeholder="如 杠铃卧推">
                 </div>
                 <div class="field">
                     <label>组数</label>
@@ -455,11 +488,174 @@
                 <button type="button" class="primary-btn mt-14" id="backup-export">导出备份到本地</button>
                 <button type="button" class="ghost-btn mt-10" id="backup-import">从所选文件导入（覆盖当前账号数据）</button>
                 <p class="form-msg" id="backup-msg" aria-live="polite"></p>
+                <div class="field mt-14">
+                    <label for="theme-select">主题</label>
+                    <select id="theme-select">
+                        <option value="auto">跟随系统</option>
+                        <option value="light">浅色</option>
+                        <option value="dark">深色</option>
+                    </select>
+                </div>
+
+                <div class="sec-head mt-20"><span class="sec-title">回收站</span>
+                    <span class="sec-meta" id="trash-meta"></span></div>
+                <div id="trash-list"></div>
+
                 <p class="hint mt-20">清空只影响当前登录的账号，不可恢复，请先导出。</p>
                 <button type="button" class="ghost-btn danger-text" id="backup-clear">清空当前账号数据</button>
             </div>
         </div>
     </div>
+
+
+    <!-- ================= 模板 ================= -->
+    <div class="sheet-mask" id="tpl-mask" hidden>
+        <div class="sheet" role="dialog" aria-modal="true" aria-label="训练模板">
+            <div class="sheet-grab"></div>
+            <div class="sheet-head">
+                <span>训练模板</span>
+                <button type="button" class="sheet-close" id="tpl-close" aria-label="关闭">✕</button>
+            </div>
+            <div class="sheet-body">
+                <p class="hint">把常练的安排存成模板，点「开练」直接生成今日计划，动作和组次重量原样带过来。</p>
+                <div id="tpl-list"></div>
+                <button type="button" class="ghost-btn mt-10" id="tpl-save-today">用今日计划存为模板</button>
+                <p class="form-msg" id="tpl-msg" aria-live="polite"></p>
+            </div>
+        </div>
+    </div>
+
+    <!-- ================= 围度 ================= -->
+    <div class="sheet-mask" id="meas-mask" hidden>
+        <div class="sheet" role="dialog" aria-modal="true" aria-label="记录围度">
+            <div class="sheet-grab"></div>
+            <div class="sheet-head">
+                <span>记录围度（cm）</span>
+                <button type="button" class="sheet-close" id="meas-close" aria-label="关闭">✕</button>
+            </div>
+            <div class="sheet-body">
+                <form id="meas-form" novalidate>
+                    <div class="form-grid">
+                        <div class="field">
+                            <label for="m-date">日期</label>
+                            <input type="date" id="m-date">
+                        </div>
+                        <div class="field">
+                            <label for="m-waist">腰围</label>
+                            <input type="number" id="m-waist" min="10" max="200" step="0.1" inputmode="decimal" placeholder="如 88.5">
+                        </div>
+                        <div class="field">
+                            <label for="m-chest">胸围</label>
+                            <input type="number" id="m-chest" min="10" max="200" step="0.1" inputmode="decimal" placeholder="如 105">
+                        </div>
+                        <div class="field">
+                            <label for="m-arm">臂围</label>
+                            <input type="number" id="m-arm" min="10" max="200" step="0.1" inputmode="decimal" placeholder="如 36">
+                        </div>
+                        <div class="field">
+                            <label for="m-thigh">腿围</label>
+                            <input type="number" id="m-thigh" min="10" max="200" step="0.1" inputmode="decimal" placeholder="如 58">
+                        </div>
+                        <div class="field span-2">
+                            <label for="m-note">备注（选填）</label>
+                            <input type="text" id="m-note" maxlength="200" placeholder="如 空腹、放松状态">
+                        </div>
+                    </div>
+                    <button type="submit" class="primary-btn mt-14">保存</button>
+                    <p class="form-msg" id="m-msg" aria-live="polite"></p>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <!-- ================= 有氧 ================= -->
+    <div class="sheet-mask" id="cardio-mask" hidden>
+        <div class="sheet" role="dialog" aria-modal="true" aria-label="记录有氧">
+            <div class="sheet-grab"></div>
+            <div class="sheet-head">
+                <span>记录有氧</span>
+                <button type="button" class="sheet-close" id="cardio-close" aria-label="关闭">✕</button>
+            </div>
+            <div class="sheet-body">
+                <form id="cardio-form" novalidate>
+                    <div class="form-grid">
+                        <div class="field">
+                            <label for="c-date">日期</label>
+                            <input type="date" id="c-date">
+                        </div>
+                        <div class="field">
+                            <label for="c-type">类型</label>
+                            <select id="c-type">
+                                <option>跑步</option>
+                                <option>快走</option>
+                                <option>单车</option>
+                                <option>椭圆机</option>
+                                <option>跳绳</option>
+                                <option>游泳</option>
+                                <option>其他</option>
+                            </select>
+                        </div>
+                        <div class="field">
+                            <label for="c-minutes">时长（分钟）</label>
+                            <input type="number" id="c-minutes" min="1" max="600" step="1" inputmode="numeric" placeholder="如 30">
+                        </div>
+                        <div class="field">
+                            <label for="c-distance">距离（km，选填）</label>
+                            <input type="number" id="c-distance" min="0" max="200" step="0.1" inputmode="decimal" placeholder="如 4.5">
+                        </div>
+                        <div class="field">
+                            <label for="c-hr">平均心率（选填）</label>
+                            <input type="number" id="c-hr" min="40" max="220" step="1" inputmode="numeric" placeholder="如 135">
+                        </div>
+                        <div class="field">
+                            <label for="c-note">备注（选填）</label>
+                            <input type="text" id="c-note" maxlength="200" placeholder="如 坡度 6">
+                        </div>
+                    </div>
+                    <button type="submit" class="primary-btn mt-14">保存</button>
+                    <p class="form-msg" id="c-msg" aria-live="polite"></p>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <!-- ================= 目标 ================= -->
+    <div class="sheet-mask" id="goal-mask" hidden>
+        <div class="sheet" role="dialog" aria-modal="true" aria-label="训练目标">
+            <div class="sheet-grab"></div>
+            <div class="sheet-head">
+                <span>我的目标</span>
+                <button type="button" class="sheet-close" id="goal-close" aria-label="关闭">✕</button>
+            </div>
+            <div class="sheet-body">
+                <form id="goal-form" novalidate>
+                    <div class="form-grid">
+                        <div class="field">
+                            <label for="g-weekly">每周训练次数</label>
+                            <input type="number" id="g-weekly" min="1" max="21" step="1" inputmode="numeric" placeholder="如 4">
+                        </div>
+                        <div class="field">
+                            <label for="g-weight">目标体重 (kg)</label>
+                            <input type="number" id="g-weight" min="20" max="500" step="0.1" inputmode="decimal" placeholder="如 75">
+                        </div>
+                        <div class="field span-2">
+                            <label for="g-date">目标日期（选填）</label>
+                            <input type="date" id="g-date">
+                        </div>
+                    </div>
+                    <button type="submit" class="primary-btn mt-14">保存目标</button>
+                    <p class="form-msg" id="g-msg" aria-live="polite"></p>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <div class="undo-bar" id="undo-bar" hidden>
+        <span id="undo-text">已删除</span>
+        <button type="button" class="undo-btn" id="undo-btn">撤销</button>
+    </div>
+
+    <datalist id="ex-name-list"></datalist>
 
     <div class="toast" id="toast" hidden></div>
 
