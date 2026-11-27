@@ -304,8 +304,8 @@ async function loadPlanTab() {
     $("#today-count").textContent = `${todayList.length} 个计划`;
     $("#today-plans").innerHTML = todayList.length
         ? todayList.map((p) => planCard(p, "plan")).join("")
-        : `<div class="empty"><span class="empty-icon">📋</span>今天还没有训练计划<br>点右下角 <b>＋</b> 新建一个<br>
-             <button type="button" class="empty-pick" data-action="pick-hist">从历史里选一个</button></div>`;
+        : `<div class="empty"><span class="empty-icon">📋</span>今天还没有训练计划<br>点右上角 <b>＋ 生成计划</b>，三种方式挑一种<br>
+             <button type="button" class="empty-pick" data-action="open-gen">生成今天的计划</button></div>`;
 
     $("#other-wrap").style.display = others.length ? "" : "none";
     $("#other-plans").innerHTML = others.map((p) => planCard(p, "plan")).join("");
@@ -399,6 +399,7 @@ async function loadHistory() {
     loadWeekly().catch(() => {});
 
     loadHeat().catch(() => {});
+    loadPartVolume().catch(() => {});
     loadMeas().catch(() => {});
     loadCardio().catch(() => {});
 
@@ -865,6 +866,7 @@ async function openTraining(pid) {
         const plan = await api(`/api/plans/${pid}`);
         trainPlan = plan;
         await loadLastPerf(plan);
+        await loadTrainingInsights(plan);
         $("#train-title").textContent = plan.title || `${plan.body_parts.join("/")}训练`;
         trainMask.hidden = false;
         document.body.style.overflow = "hidden";
@@ -922,11 +924,12 @@ function renderTraining() {
             : "";
         return `<div class="te-card ${cls}">
       <div class="te-head">
-        <span class="te-name">${escapeHtml(e.name)}${skipped ? `<span class="skip-tag">已跳过</span>` : ""}</span>
+        <span class="te-name">${escapeHtml(e.name)}${skipped ? `<span class="skip-tag">已跳过</span>` : ""}${badgeHtml(e)}</span>
         <span class="te-count">${skipped ? "本次不做" : `${done.length}/${e.sets} 组`}</span>
       </div>
       <div class="te-sub">计划 ${e.reps} 次 × ${e.weight > 0 ? e.weight + " kg" : "自重"} · 休息 ${fmtRest(e.rest_seconds)}${rpeAvg}</div>
       ${lastPerfLine(e)}
+      ${suggestLine(e)}
       <div class="te-actions">
         <button class="te-act" data-action="swap-ex" data-pid="${plan.id}" data-eid="${e.id}" data-name="${escapeHtml(e.name)}">↔ 替换</button>
         <button class="te-act warn" data-action="skip-ex" data-pid="${plan.id}" data-eid="${e.id}" data-skip="${skipped ? "0" : "1"}">${skipped ? "恢复这个动作" : "跳过这个动作"}</button>
@@ -978,6 +981,14 @@ async function toggleTrainingSet(btn) {
         delete rpeDrafts[`${eid}-${n}`];
         renderTraining();
         if (payload.done) {
+            const before = (prs[ex.name] || {}).pr_weight || 0;
+            const isFirst = !prs[ex.name];
+            if (payload.weight > before && payload.weight > 0) {
+                prs[ex.name] = { name: ex.name, pr_weight: payload.weight, pr_date: TODAY, sessions: (prs[ex.name] ? prs[ex.name].sessions + 1 : 1) };
+                toast(isFirst ? `首次记录「${ex.name}」· ${payload.weight}kg` : `🎉 新 PR：${ex.name} ${payload.weight}kg`, 2600);
+            } else if (isFirst) {
+                prs[ex.name] = { name: ex.name, pr_weight: payload.weight || 0, pr_date: TODAY, sessions: 1 };
+            }
             if (ex.rest_seconds) beginRest(pid, eid, ex.name, ex.rest_seconds);
             if (ex.done_sets.length >= ex.sets) toast(`「${ex.name}」${ex.sets} 组全部完成 🎉`);
             else toast(`第 ${n} 组已记录 · ${payload.weight ? payload.weight + "kg × " : ""}${payload.reps} 次`);
@@ -2259,14 +2270,23 @@ tplMask.addEventListener("click", (e) => { if (e.target === tplMask) hideMask(tp
 
 $("#tpl-save-today").addEventListener("click", async () => {
     try {
-        const plans = await api(`/api/plans?plan_date=${TODAY}&status=planned`);
-        const source = plans.find((p) => p.exercise_count > 0) || plans[0];
+        // 优先今天的待完成计划；没有就退而用今天已打卡的、再退到最近一次训练
+        let plans = await api(`/api/plans?plan_date=${TODAY}&status=planned`);
+        let source = plans.find((p) => p.exercise_count > 0);
         if (!source) {
-            $("#tpl-msg").textContent = "今天还没有带动作的计划，先建一个再存模板";
+            plans = await api(`/api/plans?plan_date=${TODAY}`);
+            source = plans.find((p) => p.exercise_count > 0);
+        }
+        if (!source) {
+            const others = await api("/api/plans/others");
+            source = others.find((p) => p.exercise_count > 0);
+        }
+        if (!source) {
+            $("#tpl-msg").textContent = "还没有带动作的计划可以存，先建一个";
             return;
         }
         await api("/api/templates", { method: "POST", body: JSON.stringify({ plan_id: source.id }) });
-        $("#tpl-msg").textContent = "已存为模板";
+        $("#tpl-msg").textContent = `已存为模板：${source.title || source.body_parts.join("+")}`;
         $("#tpl-msg").className = "form-msg ok";
         await loadTplList();
     } catch (err) {
@@ -2373,4 +2393,120 @@ if ("serviceWorker" in navigator) {
     window.addEventListener("load", () => {
         navigator.serviceWorker.register("sw.js").catch(() => { /* 本地 file:// 或权限受限时忽略 */ });
     });
+}
+
+/* ================= 布局改版：数据分区切换 ================= */
+const PANE_KEY = "fitness_pane_v1";
+function setPane(name, remember = true) {
+    Array.prototype.forEach.call($$(".seg-btn"), (b) => b.classList.toggle("active", b.dataset.pane === name));
+    Array.prototype.forEach.call($$(".data-pane"), (p) => p.classList.toggle("active", p.id === `pane-${name}`));
+    if (remember) localStorage.setItem(PANE_KEY, name);
+}
+Array.prototype.forEach.call($$(".seg-btn"), (btn) => {
+    btn.addEventListener("click", () => setPane(btn.dataset.pane));
+});
+(function initPane() {
+    const saved = localStorage.getItem(PANE_KEY);
+    if (saved && document.getElementById(`pane-${saved}`)) setPane(saved, false);
+})();
+
+/* ================= 生成计划 ================= */
+const genMask = $("#gen-mask");
+function openGenSheet() {
+    showMask(genMask);
+}
+$("#gen-close").addEventListener("click", () => hideMask(genMask));
+genMask.addEventListener("click", (e) => { if (e.target === genMask) hideMask(genMask); });
+
+document.addEventListener("click", (e) => {
+    const btn = e.target.closest("[data-action]");
+    if (!btn) return;
+    const action = btn.dataset.action;
+    if (action === "open-gen") {
+        openGenSheet();
+    } else if (action === "gen-new") {
+        hideMask(genMask);
+        openSheet();
+    } else if (action === "gen-tpl") {
+        hideMask(genMask);
+        openTplSheet();
+    } else if (action === "pick-hist" && !genMask.hidden) {
+        hideMask(genMask);
+    }
+});
+
+/* =====================================================================
+   训练科学化：每部位周组数 / 渐进超负荷建议 / PR 徽章
+   ===================================================================== */
+
+/* ---------------- 本周每部位组数 ---------------- */
+const PART_TARGET_MIN = 10;   // 每部位每周建议下限（组）
+const PART_TARGET_MAX = 20;   // 上限
+async function loadPartVolume() {
+    const box = $("#part-volume");
+    if (!box) return;
+    const data = await api("/api/part-sets?weeks=1");
+    if (!data.parts.length || !data.total_sets) {
+        box.innerHTML = `<div class="pv-head"><span>本周各部位组数</span><span class="pv-total">本周还没有完成的组</span></div>`;
+        return;
+    }
+    const chips = data.parts
+        .filter((p) => p.sets > 0 || p.plans > 0)
+        .map((p) => {
+            const cls = p.sets >= PART_TARGET_MIN ? "" : (p.sets >= PART_TARGET_MIN - 4 ? "mid" : "low");
+            return `<span class="pv-chip ${cls}">${escapeHtml(p.part)} <b>${p.sets}</b> 组</span>`;
+        }).join("");
+    const low = data.parts.filter((p) => p.sets > 0 && p.sets < PART_TARGET_MIN);
+    const lowText = low.length
+        ? `${low.map((p) => p.part).join("、")}还不足 ${PART_TARGET_MIN} 组`
+        : "各部位都够了";
+    box.innerHTML = `
+        <div class="pv-head"><span>本周各部位组数</span><span class="pv-total">共 ${data.total_sets} 组 · 建议每部位 ${PART_TARGET_MIN}–${PART_TARGET_MAX} 组</span></div>
+        <div class="pv-chips">${chips}</div>
+        <div class="pv-hint">${low.length ? "⚠️ " : "✅ "}${lowText}</div>`;
+}
+
+/* ---------------- 训练页洞察：历史与 PR ---------------- */
+let exHist = {};
+let prs = {};
+
+async function loadTrainingInsights(plan) {
+    exHist = {};
+    prs = {};
+    const names = [...new Set((plan.exercises || []).map((e) => e.name))];
+    const [histRes, prRes] = await Promise.all([
+        Promise.all(names.map((n) => api(`/api/exercise-history?name=${encodeURIComponent(n)}&limit=4`).catch(() => null))),
+        api("/api/prs").catch(() => []),
+    ]);
+    histRes.forEach((r, i) => { if (r) exHist[names[i]] = r.sessions; });
+    (prRes || []).forEach((item) => { prs[item.name] = item; });
+}
+
+function badgeHtml(e) {
+    const pr = prs[e.name];
+    if (pr && pr.pr_weight) return `<span class="te-pr">🏆 ${num(pr.pr_weight)}kg</span>`;
+    if (!exHist[e.name] || !exHist[e.name].length) return `<span class="te-pr new">新动作</span>`;
+    return "";
+}
+
+/* 渐进超负荷：连续 3 次满量同重量 → 建议加重；连续 2 次没做满 → 建议减重 */
+const WEIGHT_STEP = 2.5;
+function suggestLine(e) {
+    const hs = exHist[e.name];
+    if (!hs || hs.length < 2) return "";
+    const sameSuccess = hs.slice(0, 3);
+    const allOk = sameSuccess.length >= 3
+        && sameSuccess.every((x) => x.completed && (x.avg_reps || 0) >= x.plan_reps)
+        && sameSuccess.every((x) => Number(x.max_weight) === Number(sameSuccess[0].max_weight));
+    if (allOk && Number(sameSuccess[0].max_weight) > 0) {
+        return `<div class="te-tip up">💡 连续 3 次做满 ${sameSuccess[0].plan_sets}×${sameSuccess[0].plan_reps} @ ${num(sameSuccess[0].max_weight)}kg，可以试试 ${num(Number(sameSuccess[0].max_weight) + WEIGHT_STEP)}kg</div>`;
+    }
+    const recent = hs.slice(0, 2);
+    const allFail = recent.every((x) => !x.completed || (x.avg_reps || 0) < x.plan_reps);
+    if (allFail) {
+        const last = recent[0];
+        const lighter = Math.max(0, Number(last.max_weight) - WEIGHT_STEP);
+        return `<div class="te-tip down">💡 最近两次都没做满计划，建议减到 ${num(lighter)}kg，或先把组数做满</div>`;
+    }
+    return "";
 }

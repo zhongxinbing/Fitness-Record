@@ -90,8 +90,7 @@
                 <span class="sec-title">今天要练</span>
                 <span class="sec-right">
                     <span class="sec-meta" id="today-count">0 个计划</span>
-                    <button type="button" class="head-pick" data-action="open-tpl">模板</button>
-                    <button type="button" class="head-pick" data-action="pick-hist">从历史选</button>
+                    <button type="button" class="head-pick" data-action="open-gen">＋ 生成计划</button>
                 </span>
             </div>
             <div id="today-plans" class="plan-stack"></div>
@@ -104,21 +103,31 @@
 
         <!-- ================= 历史 ================= -->
         <section id="tab-history" class="tab-panel">
-            <div class="overview" id="overview"></div>
+            <div class="summary-card">
+                <div class="sc-head">
+                    <span class="sc-title">训练概览</span>
+                    <span class="sc-right">
+                        <span class="sc-streak" id="streak-text"></span>
+                        <button type="button" class="head-pick" data-action="open-goal">目标</button>
+                    </span>
+                </div>
+                <div class="overview" id="overview"></div>
+                <div id="part-volume"></div>
+                <div id="heat-panel"></div>
+            </div>
+
+            <div class="seg-tabs" id="data-tabs" role="tablist">
+                <button type="button" class="seg-btn active" data-pane="train" role="tab">训练记录</button>
+                <button type="button" class="seg-btn" data-pane="body" role="tab">身体数据</button>
+                <button type="button" class="seg-btn" data-pane="cardio" role="tab">有氧</button>
+            </div>
+
+            <div class="data-pane active" id="pane-train">
             <div class="sec-head">
                 <span class="sec-title">周视图</span>
                 <span class="sec-meta" id="week-meta"></span>
             </div>
             <div id="week-panel"></div>
-
-            <div class="sec-head mt-20">
-                <span class="sec-title">打卡日历</span>
-                <span class="sec-right">
-                    <span class="sec-meta" id="streak-text"></span>
-                    <button type="button" class="head-pick" data-action="open-goal">目标</button>
-                </span>
-            </div>
-            <div id="heat-panel"></div>
 
             <div class="sec-head mt-20">
                 <span class="sec-title">训练历史</span>
@@ -128,8 +137,10 @@
                 </span>
             </div>
             <div id="history-list"></div>
+            </div>
 
-            <div class="sec-head mt-20">
+            <div class="data-pane" id="pane-body">
+            <div class="sec-head">
                 <span class="sec-title">体重</span>
                 <button type="button" class="head-pick" data-action="add-body">＋ 记录</button>
             </div>
@@ -140,12 +151,15 @@
                 <button type="button" class="head-pick" data-action="add-meas">＋ 记录</button>
             </div>
             <div id="meas-panel"></div>
+            </div>
 
-            <div class="sec-head mt-20">
+            <div class="data-pane" id="pane-cardio">
+            <div class="sec-head">
                 <span class="sec-title">有氧</span>
                 <button type="button" class="head-pick" data-action="add-cardio">＋ 记录</button>
             </div>
             <div id="cardio-panel"></div>
+            </div>
         </section>
     </main>
 
@@ -507,6 +521,31 @@
         </div>
     </div>
 
+
+    <!-- ================= 生成计划 ================= -->
+    <div class="sheet-mask" id="gen-mask" hidden>
+        <div class="sheet" role="dialog" aria-modal="true" aria-label="生成计划">
+            <div class="sheet-grab"></div>
+            <div class="sheet-head">
+                <span>怎么开始今天这一练</span>
+                <button type="button" class="sheet-close" id="gen-close" aria-label="关闭">✕</button>
+            </div>
+            <div class="sheet-body">
+                <button type="button" class="gen-opt" data-action="gen-new">
+                    <span class="go-ico">✏️</span>
+                    <span class="go-text"><b>新建空计划</b><i>自己挑部位、填动作和组次</i></span>
+                </button>
+                <button type="button" class="gen-opt" data-action="gen-tpl">
+                    <span class="go-ico">📋</span>
+                    <span class="go-text"><b>用训练模板</b><i>常练的安排已存好，点一下就是今日计划</i></span>
+                </button>
+                <button type="button" class="gen-opt" data-action="pick-hist">
+                    <span class="go-ico">🕘</span>
+                    <span class="go-text"><b>复制历史某次训练</b><i>从练过的记录里照抄一份</i></span>
+                </button>
+            </div>
+        </div>
+    </div>
 
     <!-- ================= 模板 ================= -->
     <div class="sheet-mask" id="tpl-mask" hidden>

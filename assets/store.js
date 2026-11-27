@@ -1116,6 +1116,83 @@
     }
 
     /* ---- 动作进步 ---- */
+    /* ---- 本周每部位组数（增肌看「每部位每周有效组数」） ---- */
+    route("GET", "/api/part-sets", (q) => {
+        const weeks = Math.max(1, Math.min(12, Number(q.weeks) || 1));
+        const start = addDays(weekStart(todayISO()), -7 * (weeks - 1));
+        const parts = {};
+        db.plans
+            .filter((p) => p.status === "done" && p.plan_date >= start)
+            .forEach((p) => {
+                const done = p.exercises.filter((e) => !e.skipped);
+                // 直接打卡没逐组记录时，按计划组数计（否则会出现「0 组」的假警告）
+                const anyLog = done.some((e) => e.logs.some((l) => l.done));
+                done.forEach((e) => {
+                    const key = p.body_parts && p.body_parts.length === 1 ? p.body_parts[0] : (p.body_parts[0] || "其他");
+                    const item = parts[key] || { part: key, sets: 0, plans: 0, exercises: 0 };
+                    const logged = e.logs.filter((l) => l.done).length;
+                    item.sets += logged || (anyLog ? 0 : e.sets);
+                    item.exercises += 1;
+                    parts[key] = item;
+                });
+                (p.body_parts || []).forEach((part) => {
+                    if (!parts[part]) parts[part] = { part, sets: 0, plans: 0, exercises: 0 };
+                    parts[part].plans += 1;
+                });
+            });
+        const list = Object.values(parts).sort((a, b) => b.sets - a.sets);
+        const totalSets = list.reduce((sum, i) => sum + i.sets, 0);
+        return { start, weeks, parts: list, total_sets: totalSets };
+    });
+
+    /* ---- 某动作最近几次的表现（用于渐进超负荷建议） ---- */
+    route("GET", "/api/exercise-history", (q) => {
+        const name = String(q.name || "").trim();
+        if (!name) throw new HttpError(422, "请提供动作名称");
+        const limit = Math.max(1, Math.min(10, Number(q.limit) || 5));
+        const sessions = db.plans
+            .filter((p) => p.status === "done")
+            .sort((a, b) => (a.plan_date === b.plan_date ? b.id - a.id : a.plan_date < b.plan_date ? 1 : -1))
+            .map((p) => {
+                const ex = p.exercises.find((e) => e.name === name && !e.skipped);
+                if (!ex) return null;
+                const logs = ex.logs.filter((l) => l.done);
+                return {
+                    plan_date: p.plan_date,
+                    plan_sets: ex.sets,
+                    plan_reps: ex.reps,
+                    done_sets: logs.length,
+                    max_weight: logs.reduce((mx, l) => Math.max(mx, Number(l.weight) || 0), ex.weight || 0),
+                    avg_reps: logs.length ? Math.round(logs.reduce((sum, l) => sum + (Number(l.reps) || 0), 0) / logs.length) : null,
+                    volume: r2(logs.reduce((sum, l) => sum + (Number(l.reps) || 0) * (Number(l.weight) || 0), 0)),
+                    completed: logs.length >= ex.sets,
+                };
+            })
+            .filter(Boolean)
+            .slice(0, limit);
+        return { name, sessions };
+    });
+
+    /* ---- 各动作的 PR（训练页徽章用） ---- */
+    route("GET", "/api/prs", () => {
+        const map = new Map();
+        db.plans
+            .filter((p) => p.status === "done")
+            .forEach((p) => {
+                p.exercises.forEach((e) => {
+                    if (e.skipped) return;
+                    const logs = e.logs.filter((l) => l.done);
+                    const weight = logs.length ? logs.reduce((mx, l) => Math.max(mx, Number(l.weight) || 0), 0) : (e.weight || 0);
+                    if (!weight) return;
+                    const item = map.get(e.name) || { name: e.name, pr_weight: 0, pr_date: null, sessions: 0 };
+                    item.sessions += 1;
+                    if (weight > item.pr_weight) { item.pr_weight = weight; item.pr_date = p.plan_date; }
+                    map.set(e.name, item);
+                });
+            });
+        return Array.from(map.values()).sort((a, b) => b.pr_weight - a.pr_weight);
+    });
+
     route("GET", "/api/progress/exercise-names", () => {
         const map = new Map();
         db.plans.forEach((p) => {
