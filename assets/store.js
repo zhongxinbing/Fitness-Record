@@ -12,7 +12,12 @@
 (function () {
     "use strict";
 
-    const KEY = "fitness_local_v1";
+    // 账号与数据分开放：账号表 / 会话 / 每个账号各自一份数据
+    const ACCOUNTS_KEY = "fitness_accounts_v1";
+    const SESSION_KEY = "fitness_session_v1";
+    const DATA_PREFIX = "fitness_data_v1_";
+    const LEGACY_KEY = "fitness_local_v1";   // 上一版（无账号）的数据，首次注册时认领
+
     const BODY_PARTS = ["胸", "背", "腿", "肩", "臂", "核心", "有氧", "全身", "其他"];
     const MAX_PARTS = 5;
     const MAX_EXERCISES = 20;
@@ -80,26 +85,142 @@
         return parsed;
     }
 
-    let db = load();
-
-    function load() {
+    /* ---------------- 账号（本机档案，不是服务器账号） ---------------------------- */
+    function loadAccounts() {
         try {
-            const raw = localStorage.getItem(KEY);
-            return raw ? normalize(JSON.parse(raw)) : emptyDB();
+            const list = JSON.parse(localStorage.getItem(ACCOUNTS_KEY));
+            return Array.isArray(list) ? list : [];
         } catch (err) {
-            console.warn("本地数据读取失败，按空库启动：", err);
-            return emptyDB();
+            console.warn("账号表读取失败：", err);
+            return [];
         }
     }
 
-    function save() {
+    function saveAccounts() {
         try {
-            localStorage.setItem(KEY, JSON.stringify(db));
+            localStorage.setItem(ACCOUNTS_KEY, JSON.stringify(accounts));
+        } catch (err) {
+            throw new HttpError(507, "浏览器本地存储已满，无法创建账号");
+        }
+    }
+
+    const accounts = loadAccounts();
+    let session = null;          // { id, username }
+    let db = emptyDB();          // 当前账号的数据
+    let dataKey = null;          // 当前账号的存储键
+
+    function requireSession() {
+        if (!session) throw new HttpError(401, "请先登录");
+    }
+
+    /* ---- 口令派生：优先 WebCrypto，非安全上下文（file:// 或 http 内网 IP）退回轻量哈希 ---- */
+    const encoder = new TextEncoder();
+
+    function hexOf(bytes) {
+        return Array.from(new Uint8Array(bytes)).map((b) => b.toString(16).padStart(2, "0")).join("");
+    }
+
+    function randomSalt() {
+        const arr = new Uint8Array(16);
+        if (window.crypto && window.crypto.getRandomValues) window.crypto.getRandomValues(arr);
+        else for (let i = 0; i < arr.length; i += 1) arr[i] = Math.floor(Math.random() * 256);
+        return hexOf(arr);
+    }
+
+    function weakHash(text) {
+        // 仅在 crypto.subtle 不可用时用作兜底：不是密码学强度，只防误看
+        let h1 = 0x811c9dc5;
+        let h2 = 0x1000193;
+        for (let round = 0; round < 20000; round += 1) {
+            for (let i = 0; i < text.length; i += 1) {
+                h1 = (h1 ^ text.charCodeAt(i)) >>> 0;
+                h1 = (h1 * 0x01000193) >>> 0;
+                h2 = (h2 + text.charCodeAt(i) + round) >>> 0;
+                h2 = ((h2 << 5) | (h2 >>> 27)) >>> 0;
+            }
+        }
+        return `w${h1.toString(16)}${h2.toString(16)}`;
+    }
+
+    async function derive(password, saltHex) {
+        if (!window.crypto || !window.crypto.subtle) {
+            return { scheme: "weak", hash: weakHash(`${saltHex}|${password}`) };
+        }
+        const salt = new Uint8Array(saltHex.match(/../g).map((h) => parseInt(h, 16)));
+        const key = await window.crypto.subtle.importKey("raw", encoder.encode(password), "PBKDF2", false, ["deriveBits"]);
+        const bits = await window.crypto.subtle.deriveBits(
+            { name: "PBKDF2", salt, iterations: 120000, hash: "SHA-256" },
+            key,
+            256
+        );
+        return { scheme: "pbkdf2", hash: hexOf(bits) };
+    }
+
+    function currentAccount() {
+        return session ? accounts.find((a) => a.id === session.id) || null : null;
+    }
+
+    /* ---- 数据读写（按账号分键） ---- */
+    function normalize(parsed) {
+        if (!parsed || !Array.isArray(parsed.plans)) return emptyDB();
+        parsed.seq = parsed.seq || { plan: 1, ex: 1, body: 1 };
+        parsed.bodies = parsed.bodies || [];
+        parsed.plans.forEach((p) => {
+            p.exercises = p.exercises || [];
+            p.body_parts = p.body_parts || [];
+            p.exercises.forEach((e) => {
+                e.logs = e.logs || [];
+                e.skipped = !!e.skipped;
+                e.note = e.note || "";
+                e.rest_seconds = e.rest_seconds || 90;
+            });
+        });
+        return parsed;
+    }
+
+    function emptyDB() {
+        return { version: 1, seq: { plan: 1, ex: 1, body: 1 }, plans: [], bodies: [] };
+    }
+
+    function readJSON(key) {
+        try {
+            const raw = localStorage.getItem(key);
+            return raw ? normalize(JSON.parse(raw)) : null;
+        } catch (err) {
+            console.warn("本地数据读取失败：", key, err);
+            return null;
+        }
+    }
+
+    function loadFor(account) {
+        dataKey = DATA_PREFIX + account.id;
+        db = readJSON(dataKey) || emptyDB();
+    }
+
+    function save() {
+        if (!session) throw new HttpError(401, "请先登录");
+        try {
+            localStorage.setItem(dataKey, JSON.stringify(db));
         } catch (err) {
             console.error("本地数据写入失败：", err);
             throw new HttpError(507, "浏览器本地存储已满，请先在「备份」里导出，再清理旧数据");
         }
     }
+
+    // 启动时恢复上次登录
+    (function restoreSession() {
+        try {
+            const raw = localStorage.getItem(SESSION_KEY);
+            const saved = raw ? JSON.parse(raw) : null;
+            const account = saved && accounts.find((a) => a.id === saved.id);
+            if (account) {
+                session = { id: account.id, username: account.username };
+                loadFor(account);
+            }
+        } catch (err) {
+            console.warn("会话恢复失败：", err);
+        }
+    })();
 
     function nextId(kind) {
         const id = db.seq[kind] || 1;
@@ -220,6 +341,13 @@
     }
 
     function dispatch(method, path, query, body) {
+        // 除注册/登录/查询当前用户外，所有接口都要求已登录
+        const authPath =
+            path === "/api/auth/register" ||
+            path === "/api/auth/login" ||
+            path === "/api/auth/me" ||
+            path === "/api/auth/logout";
+        if (!authPath) requireSession();
         for (const r of routes) {
             if (r.method !== method) continue;
             const m = r.re.exec(path);
@@ -231,10 +359,76 @@
         throw new HttpError(404, `本地数据层没有这个接口：${method} ${path}`);
     }
 
-    /* ---- 元信息 / 账号（静态版没有真账号，固定返回本机用户） ---- */
+    /* ---- 账号 ---- */
+    const NAME_RE = /^[A-Za-z0-9_\u4e00-\u9fa5]{2,20}$/;
+
+    route("POST", "/api/auth/register", async (q, p, body) => {
+        const username = String(body.username || "").trim();
+        const password = String(body.password || "");
+        if (!NAME_RE.test(username)) throw new HttpError(422, "用户名只能包含字母、数字、下划线或中文，长度 2–20");
+        if (password.length < 8) throw new HttpError(422, "密码至少 8 位");
+        if (accounts.some((a) => a.username === username)) throw new HttpError(409, "该用户名已被占用");
+
+        const salt = randomSalt();
+        const derived = await derive(password, salt);
+        const account = {
+            id: accounts.reduce((mx, a) => Math.max(mx, a.id), 0) + 1,
+            username,
+            salt,
+            scheme: derived.scheme,
+            hash: derived.hash,
+            created_at: nowLocal(),
+        };
+        accounts.push(account);
+        saveAccounts();
+
+        session = { id: account.id, username: account.username };
+        localStorage.setItem(SESSION_KEY, JSON.stringify(session));
+
+        // 首个账号认领上一版（无账号）留下的数据，避免升级后记录看不见
+        let adopted = false;
+        const legacy = readJSON(LEGACY_KEY);
+        if (legacy && legacy.plans.length) {
+            dataKey = DATA_PREFIX + account.id;
+            db = legacy;
+            save();
+            localStorage.removeItem(LEGACY_KEY);
+            localStorage.removeItem("fitness_local_v1"); // 兼容旧键名
+            adopted = true;
+        } else {
+            loadFor(account);
+        }
+        return { user: { id: account.id, username: account.username }, adopted_legacy: adopted };
+    });
+
+    route("POST", "/api/auth/login", async (q, p, body) => {
+        const username = String(body.username || "").trim();
+        const password = String(body.password || "");
+        const account = accounts.find((a) => a.username === username);
+        if (!account) throw new HttpError(401, "用户名或密码不正确");
+        const derived = await derive(password, account.salt);
+        if (derived.hash !== account.hash) throw new HttpError(401, "用户名或密码不正确");
+        session = { id: account.id, username: account.username };
+        localStorage.setItem(SESSION_KEY, JSON.stringify(session));
+        loadFor(account);
+        return { user: { id: account.id, username: account.username }, adopted_legacy: false };
+    });
+
+    route("GET", "/api/auth/me", () => {
+        if (!session) throw new HttpError(401, "请先登录");
+        return { id: session.id, username: session.username };
+    });
+
+    route("POST", "/api/auth/logout", () => {
+        session = null;
+        db = emptyDB();
+        dataKey = null;
+        localStorage.removeItem(SESSION_KEY);
+        return null;
+    });
+
+    /* ---- 元信息 ---- */
     route("GET", "/api/body-parts", () => ({ body_parts: BODY_PARTS.slice() }));
-    route("GET", "/api/auth/me", () => ({ id: 1, username: "本机" }));
-    route("POST", "/api/auth/logout", () => null);
 
     /* ---- 计划查询 ---- */
     route("GET", "/api/plans", (q) => {
@@ -712,15 +906,17 @@
                 body = {};
             }
         }
-        // 让调用方仍能 await，内部其实是同步计算
-        return dispatch(method, path, queryObject(query), body);
+        // 处理器可能是异步的（口令派生要等 WebCrypto），统一 await
+        return await dispatch(method, path, queryObject(query), body);
     }
 
     /* ---------------- 备份 / 导入 / 清空 ---------------- */
     function exportBlob() {
+        requireSession();
         const payload = {
             app: "健身记录·静态版",
             version: db.version || 1,
+            account: session.username,
             exported_at: nowLocal(),
             data: db,
         };
@@ -728,6 +924,7 @@
     }
 
     function importJSON(text) {
+        requireSession();
         let parsed;
         try {
             parsed = JSON.parse(text);
@@ -737,23 +934,36 @@
         const data = parsed && parsed.data && parsed.data.plans ? parsed.data : parsed;
         if (!data || !Array.isArray(data.plans)) throw new Error("备份文件里没有找到训练数据");
         db = normalize(data);
+        // 数据可能来自别的账号，序号要重新对齐，避免 id 冲突
+        db.seq = db.seq || { plan: 1, ex: 1, body: 1 };
+        const maxOf = (start, items) => items.reduce((mx, v) => (v > mx ? v : mx), start);
+        db.seq.plan = maxOf(db.seq.plan || 1, db.plans.map((p) => p.id + 1));
+        db.seq.ex = maxOf(db.seq.ex || 1, db.plans.flatMap((p) => p.exercises.map((e) => e.id + 1)));
+        db.seq.body = maxOf(db.seq.body || 1, db.bodies.map((b) => b.id + 1));
         save();
         return db.plans.length;
     }
 
     function clearAll() {
+        requireSession();
         db = emptyDB();
         save();
     }
 
     function stats() {
+        const raw = dataKey ? localStorage.getItem(dataKey) || "" : "";
         return {
+            user: session ? session.username : "",
             plans: db.plans.length,
             done: db.plans.filter((p) => p.status === "done").length,
             bodies: db.bodies.length,
-            bytes: (localStorage.getItem(KEY) || "").length,
+            bytes: raw.length,
         };
     }
 
-    window.FitnessStore = { call, exportBlob, importJSON, clearAll, stats, BODY_PARTS };
+    function accountsInfo() {
+        return accounts.map((a) => ({ id: a.id, username: a.username, created_at: a.created_at }));
+    }
+
+    window.FitnessStore = { call, exportBlob, importJSON, clearAll, stats, accountsInfo, BODY_PARTS };
 })();

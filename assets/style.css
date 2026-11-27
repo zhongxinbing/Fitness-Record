@@ -1128,3 +1128,16 @@ body {
     font-size: 13px;
     cursor: pointer;
 }
+
+/* 顶部两个按钮并排（静态版：备份 + 退出） */
+.head-actions { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+.user-chip.plain { max-width: none; }
+.user-chip.plain span { overflow: visible; }
+
+/* 登录页补充说明：本机账号，不是云端账号 */
+.auth-note {
+    margin-top: 10px;
+    font-size: 11px;
+    line-height: 1.6;
+    color: #9aa3b2;
+}
